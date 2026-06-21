@@ -178,7 +178,7 @@ site_menu() {
                 ;;
             10)
                 read -rp "Protected path, for example /status/: " protect_path
-                site-protect-user-delete "$domain" "$protect_path"
+                site-protect-user-remove "$domain" "$protect_path"
                 ;;
             11)
                 site-delete "$domain"
@@ -231,7 +231,7 @@ case "${1:-}" in
 	protect-user-add)
         site-protect-user-add "${2:-}" "${3:-}" "${4:-}"
         ;;
-    protect-user-delete)
+    protect-user-remove)
         site-protect-user-delete "${2:-}" "${3:-}" "${4:-}"
         ;;
     ""|list)
@@ -250,7 +250,7 @@ case "${1:-}" in
 		echo "  site dns example.com"
 		echo "  site unprotect example.com /status/"
 		echo "  site protect-user-add example.com /status/ admin"
-		echo "  site protect-user-delete example.com /status/ admin"        
+		echo "  site protect-user-remove example.com /status/ admin"        
 		exit 1
         ;;
 esac
