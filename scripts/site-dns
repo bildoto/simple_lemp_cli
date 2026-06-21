@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: site-dns example.com"
+    exit 1
+fi
+
+SERVER_IPV4="$(
+    ip -4 route get 1.1.1.1 2>/dev/null |
+    awk '{ for (i=1; i<=NF; i++) if ($i == "src") { print $(i+1); exit } }'
+)"
+
+SERVER_IPV6="$(
+    ip -6 route get 2606:4700:4700::1111 2>/dev/null |
+    awk '{ for (i=1; i<=NF; i++) if ($i == "src") { print $(i+1); exit } }'
+)"
+
+echo
+echo "DNS records for: $DOMAIN"
+echo
+
+if [[ -n "$SERVER_IPV4" ]]; then
+    printf "%-35s %-6s %s\n" "$DOMAIN." "A" "$SERVER_IPV4"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "A" "$SERVER_IPV4"
+fi
+
+if [[ -n "$SERVER_IPV6" ]]; then
+    printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "$SERVER_IPV6"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "AAAA" "$SERVER_IPV6"
+fi
+
+if [[ -z "$SERVER_IPV4" && -z "$SERVER_IPV6" ]]; then
+    echo "Could not detect server IP address."
+    echo
+    printf "%-35s %-6s %s\n" "$DOMAIN." "A" "SERVER_IPV4"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "A" "SERVER_IPV4"
+    printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "SERVER_IPV6"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "AAAA" "SERVER_IPV6"
+fi
+
+echo

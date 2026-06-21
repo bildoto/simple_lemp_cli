@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+PATH_TO_PROTECT="${2:-}"
+USERNAME="${3:-}"
+
+if [[ -z "$DOMAIN" || -z "$PATH_TO_PROTECT" ]]; then
+    echo "Usage: site-protect-user-add example.com /status/ [username]"
+    exit 1
+fi
+
+if [[ "$PATH_TO_PROTECT" != /* ]]; then
+    echo "Error: path must start with /"
+    exit 1
+fi
+
+if [[ "$PATH_TO_PROTECT" != */ ]]; then
+    PATH_TO_PROTECT="$PATH_TO_PROTECT/"
+fi
+
+SAFE_PATH="$(echo "$PATH_TO_PROTECT" | sed 's#^/##; s#/$##; s#[^A-Za-z0-9_-]#_#g')"
+HTPASSWD_FILE="/etc/nginx/htpasswd/$DOMAIN-$SAFE_PATH.htpasswd"
+
+if [[ ! -f "$HTPASSWD_FILE" ]]; then
+    echo "Error: protection file not found:"
+    echo "  $HTPASSWD_FILE"
+    echo "Protect the path first with:"
+    echo "  site protect $DOMAIN $PATH_TO_PROTECT"
+    exit 1
+fi
+
+if [[ -z "$USERNAME" ]]; then
+    read -rp "Username: " USERNAME
+fi
+
+if [[ -z "$USERNAME" ]]; then
+    echo "Error: username cannot be empty."
+    exit 1
+fi
+
+htpasswd "$HTPASSWD_FILE" "$USERNAME"
+
+chmod 640 "$HTPASSWD_FILE"
+chown root:www-data "$HTPASSWD_FILE"
+
+echo
+echo "User added/updated:"
+echo "  $USERNAME"

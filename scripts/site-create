@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: site-create example.com"
+    exit 1
+fi
+
+PHP_VERSION="8.4"
+
+WEB_ROOT="/srv/www/$DOMAIN"
+PUBLIC_ROOT="$WEB_ROOT/public"
+
+NGINX_CONF="/etc/nginx/sites-available/$DOMAIN.conf"
+NGINX_LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
+
+CREDENTIAL_DIR="/root/site-credentials"
+CREDENTIAL_FILE="$CREDENTIAL_DIR/$DOMAIN.txt"
+
+DB_NAME="${DOMAIN//./_}"
+DB_USER="$DB_NAME"
+DB_PASS="$(openssl rand -base64 24)"
+
+if [[ -e "$WEB_ROOT" ]]; then
+    echo "Error: web root already exists: $WEB_ROOT"
+    exit 1
+fi
+
+if [[ -e "$NGINX_CONF" ]]; then
+    echo "Error: Nginx config already exists: $NGINX_CONF"
+    exit 1
+fi
+
+mkdir -p "$PUBLIC_ROOT"
+mkdir -p "$CREDENTIAL_DIR"
+chmod 700 "$CREDENTIAL_DIR"
+
+cat > "$PUBLIC_ROOT/index.php" <<EOF
+<?php
+echo "Site $DOMAIN is working";
+EOF
+
+chown -R www-data:www-data "$WEB_ROOT"
+
+echo "Creating database..."
+
+mysql <<EOF
+CREATE DATABASE \`$DB_NAME\`
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+
+CREATE USER '$DB_USER'@'localhost'
+IDENTIFIED BY '$DB_PASS';
+
+GRANT ALL PRIVILEGES
+ON \`$DB_NAME\`.*
+TO '$DB_USER'@'localhost';
+
+FLUSH PRIVILEGES;
+EOF
+
+cat > "$CREDENTIAL_FILE" <<EOF
+Site credentials for $DOMAIN
+
+Created: $(date '+%Y-%m-%d %H:%M:%S')
+
+Domain:   $DOMAIN
+Web root: $PUBLIC_ROOT
+
+Database: $DB_NAME
+DB user:  $DB_USER
+DB pass:  $DB_PASS
+DB host:  localhost
+EOF
+
+chmod 600 "$CREDENTIAL_FILE"
+
+echo "Creating Nginx config..."
+
+cat > "$NGINX_CONF" <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN www.$DOMAIN;
+
+    root $PUBLIC_ROOT;
+    index index.php index.html;
+
+    access_log /var/log/nginx/$DOMAIN.access.log;
+    error_log  /var/log/nginx/$DOMAIN.error.log;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
+    }
+
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php$PHP_VERSION-fpm.sock;
+    }
+
+    location ~ /\. {
+        deny all;
+    }
+}
+EOF
+
+ln -s "$NGINX_CONF" "$NGINX_LINK"
+
+nginx -t
+systemctl reload nginx
+
+echo "Requesting Let's Encrypt certificate..."
+certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN"
+
+echo
+echo "Site created."
+echo "Domain:   $DOMAIN"
+echo "Web root: $PUBLIC_ROOT"
+echo "Database: $DB_NAME"
+echo
+echo "Credentials saved to:"
+echo "$CREDENTIAL_FILE"
+SERVER_IPV6="$(
+    ip -6 route get 2606:4700:4700::1111 2>/dev/null |
+    awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "src") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    '
+)"
+SERVER_IPV4="$(
+    ip -4 route get 1.1.1.1 2>/dev/null |
+    awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "src") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    '
+)"
+echo
+echo "Required DNS records:"
+echo
+
+if [[ -n "$SERVER_IPV4" ]]; then
+    printf "%-35s %-6s %s\n" "$DOMAIN." "A" "$SERVER_IPV4"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "A" "$SERVER_IPV4"
+fi
+
+if [[ -n "$SERVER_IPV6" ]]; then
+    printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "$SERVER_IPV6"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "AAAA" "$SERVER_IPV6"
+fi
+
+if [[ -z "$SERVER_IPV4" && -z "$SERVER_IPV6" ]]; then
+    printf "%-35s %-6s %s\n" "$DOMAIN." "A" "SERVER_IPV4"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "A" "SERVER_IPV4"
+    printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "SERVER_IPV6"
+    printf "%-35s %-6s %s\n" "www.$DOMAIN." "AAAA" "SERVER_IPV6"
+fi

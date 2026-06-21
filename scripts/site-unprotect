@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+PATH_TO_REMOVE="${2:-}"
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: site-unprotect example.com [path]"
+    exit 1
+fi
+
+CONF="/etc/nginx/sites-available/$DOMAIN.conf"
+HTPASSWD_DIR="/etc/nginx/htpasswd"
+
+if [[ ! -f "$CONF" ]]; then
+    echo "Error: Nginx config not found: $CONF"
+    exit 1
+fi
+
+if [[ -z "$PATH_TO_REMOVE" ]]; then
+    mapfile -t PROTECTED_PATHS < <(
+        grep "^    # SITE-MANAGER-PROTECT-BEGIN:" "$CONF" |
+        sed 's/^    # SITE-MANAGER-PROTECT-BEGIN: //'
+    )
+
+    echo
+    echo "Protected paths for: $DOMAIN"
+    echo
+
+    if [[ ${#PROTECTED_PATHS[@]} -eq 0 ]]; then
+        echo "No protected paths found."
+        exit 0
+    fi
+
+    for i in "${!PROTECTED_PATHS[@]}"; do
+        printf "[%d] %s\n" "$((i + 1))" "${PROTECTED_PATHS[$i]}"
+    done
+
+    echo "[0] Cancel"
+    echo
+
+    read -rp "Choose path: " choice
+
+    if [[ "$choice" == "0" ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    index=$((choice - 1))
+
+    if [[ -z "${PROTECTED_PATHS[$index]:-}" ]]; then
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    PATH_TO_REMOVE="${PROTECTED_PATHS[$index]}"
+fi
+
+if [[ "$PATH_TO_REMOVE" != /* ]]; then
+    echo "Error: path must start with /"
+    exit 1
+fi
+
+if [[ "$PATH_TO_REMOVE" != */ ]]; then
+    PATH_TO_REMOVE="$PATH_TO_REMOVE/"
+fi
+
+SAFE_PATH="$(echo "$PATH_TO_REMOVE" | sed 's#^/##; s#/$##; s#[^A-Za-z0-9_-]#_#g')"
+HTPASSWD_FILE="$HTPASSWD_DIR/$DOMAIN-$SAFE_PATH.htpasswd"
+
+if ! grep -q "^    # SITE-MANAGER-PROTECT-BEGIN: $PATH_TO_REMOVE$" "$CONF"; then
+    echo "Error: protected block not found for path:"
+    echo "  $PATH_TO_REMOVE"
+    exit 1
+fi
+
+echo
+echo "Remove protection:"
+echo "  Domain: $DOMAIN"
+echo "  Path:   $PATH_TO_REMOVE"
+echo
+read -rp "Type REMOVE to continue: " confirm
+
+if [[ "$confirm" != "REMOVE" ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+tmpfile="$(mktemp)"
+
+awk -v path="$PATH_TO_REMOVE" '
+    $0 == "    # SITE-MANAGER-PROTECT-BEGIN: " path { skip=1; next }
+    $0 == "    # SITE-MANAGER-PROTECT-END: " path { skip=0; next }
+    skip != 1 { print }
+' "$CONF" > "$tmpfile"
+
+cat "$tmpfile" > "$CONF"
+rm "$tmpfile"
+
+if [[ -f "$HTPASSWD_FILE" ]]; then
+    rm "$HTPASSWD_FILE"
+fi
+
+nginx -t
+systemctl reload nginx
+
+echo
+echo "Protection removed."
+echo "Domain: $DOMAIN"
+echo "Path:   $PATH_TO_REMOVE"

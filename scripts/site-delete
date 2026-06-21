@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: site-delete example.com"
+    exit 1
+fi
+
+CONF="/etc/nginx/sites-available/$DOMAIN.conf"
+LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
+WEB_ROOT="/srv/www/$DOMAIN"
+CRED_FILE="/root/site-credentials/$DOMAIN.txt"
+DB_BASE="${DOMAIN//./_}"
+DB_USER="$DB_BASE"
+
+if [[ ! -f "$CONF" ]]; then
+    echo "Error: site config not found: $CONF"
+    exit 1
+fi
+
+mapfile -t SITE_DATABASES < <(
+    mysql -NBe "SHOW DATABASES;" |
+    awk -v base="$DB_BASE" '
+        $0 == base || index($0, base "_") == 1 {
+            print
+        }
+    '
+)
+
+echo
+echo "Delete site: $DOMAIN"
+echo
+echo "This will remove:"
+echo "  - Nginx config"
+echo "  - Website files: $WEB_ROOT"
+echo "  - Credentials file: $CRED_FILE"
+echo "  - MariaDB primary user: $DB_USER"
+
+if [[ ${#SITE_DATABASES[@]} -gt 0 ]]; then
+    echo "  - MariaDB databases and matching suffix users:"
+    for db in "${SITE_DATABASES[@]}"; do
+        echo "      $db"
+    done
+else
+    echo "  - MariaDB databases: none found"
+fi
+
+echo
+echo "This will NOT remove:"
+echo "  - Local Let's Encrypt certificate"
+echo
+echo "[1] Delete site"
+echo "[2] Delete site and remove local certificate"
+echo "[0] Cancel"
+echo
+
+read -rp "Choose action: " action
+
+case "$action" in
+    1)
+        REMOVE_CERT="no"
+        ;;
+    2)
+        REMOVE_CERT="yes"
+        ;;
+    0)
+        echo "Cancelled."
+        exit 0
+        ;;
+    *)
+        echo "Invalid action."
+        exit 1
+        ;;
+esac
+
+echo
+read -rp "Type DELETE to continue: " confirm
+
+if [[ "$confirm" != "DELETE" ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+if [[ -L "$LINK" ]]; then
+    rm "$LINK"
+fi
+
+rm "$CONF"
+
+if [[ -d "$WEB_ROOT" ]]; then
+    rm -rf "$WEB_ROOT"
+fi
+
+for db in "${SITE_DATABASES[@]}"; do
+    mysql <<EOF
+DROP DATABASE IF EXISTS \`$db\`;
+DROP USER IF EXISTS '$db'@'localhost';
+EOF
+done
+
+mysql <<EOF
+DROP USER IF EXISTS '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+
+if [[ -f "$CRED_FILE" ]]; then
+    rm "$CRED_FILE"
+fi
+
+if [[ "$REMOVE_CERT" == "yes" ]]; then
+    if certbot certificates 2>/dev/null | grep -q "Certificate Name: $DOMAIN"; then
+        certbot delete --cert-name "$DOMAIN"
+    else
+        echo "No local certificate found for $DOMAIN."
+    fi
+fi
+
+nginx -t
+systemctl reload nginx
+
+echo
+echo "Site deleted: $DOMAIN"
+
+if [[ "$REMOVE_CERT" == "yes" ]]; then
+    echo "Local certificate removed if it existed."
+else
+    echo "Local certificate was left untouched."
+fi

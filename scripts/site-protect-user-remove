@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+PATH_TO_PROTECT="${2:-}"
+USERNAME="${3:-}"
+
+if [[ -z "$DOMAIN" || -z "$PATH_TO_PROTECT" ]]; then
+    echo "Usage: site-protect-user-delete example.com /status/ [username]"
+    exit 1
+fi
+
+if [[ "$PATH_TO_PROTECT" != /* ]]; then
+    echo "Error: path must start with /"
+    exit 1
+fi
+
+if [[ "$PATH_TO_PROTECT" != */ ]]; then
+    PATH_TO_PROTECT="$PATH_TO_PROTECT/"
+fi
+
+SAFE_PATH="$(echo "$PATH_TO_PROTECT" | sed 's#^/##; s#/$##; s#[^A-Za-z0-9_-]#_#g')"
+HTPASSWD_FILE="/etc/nginx/htpasswd/$DOMAIN-$SAFE_PATH.htpasswd"
+
+if [[ ! -f "$HTPASSWD_FILE" ]]; then
+    echo "Error: protection file not found:"
+    echo "  $HTPASSWD_FILE"
+    exit 1
+fi
+
+mapfile -t USERS < <(
+    cut -d: -f1 "$HTPASSWD_FILE" | sed '/^$/d'
+)
+
+if [[ ${#USERS[@]} -eq 0 ]]; then
+    echo "No users found."
+    exit 1
+fi
+
+if [[ ${#USERS[@]} -le 1 ]]; then
+    echo "Refusing to remove the last user."
+    echo "Use site-unprotect if you want to remove protection entirely."
+    exit 1
+fi
+
+if [[ -z "$USERNAME" ]]; then
+    echo
+    echo "Users for protected path:"
+    echo "  $DOMAIN $PATH_TO_PROTECT"
+    echo
+
+    for i in "${!USERS[@]}"; do
+        printf "[%d] %s\n" "$((i + 1))" "${USERS[$i]}"
+    done
+
+    echo "[0] Cancel"
+    echo
+
+    read -rp "Choose user to remove: " choice
+
+    if [[ "$choice" == "0" ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    index=$((choice - 1))
+
+    if [[ -z "${USERS[$index]:-}" ]]; then
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    USERNAME="${USERS[$index]}"
+fi
+
+if ! grep -q "^$USERNAME:" "$HTPASSWD_FILE"; then
+    echo "Error: user not found:"
+    echo "  $USERNAME"
+    exit 1
+fi
+
+echo
+echo "Remove user:"
+echo "  $USERNAME"
+echo
+read -rp "Type REMOVE to continue: " confirm
+
+if [[ "$confirm" != "REMOVE" ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+htpasswd -D "$HTPASSWD_FILE" "$USERNAME"
+
+echo
+echo "User removed:"
+echo "  $USERNAME"

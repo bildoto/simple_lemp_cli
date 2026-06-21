@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+PATH_TO_PROTECT="${2:-}"
+
+if [[ -z "$DOMAIN" || -z "$PATH_TO_PROTECT" ]]; then
+    echo "Usage: site-protect example.com /status/"
+    exit 1
+fi
+
+if [[ "$PATH_TO_PROTECT" != /* ]]; then
+    echo "Error: path must start with /"
+    exit 1
+fi
+
+if [[ "$PATH_TO_PROTECT" != */ ]]; then
+    PATH_TO_PROTECT="$PATH_TO_PROTECT/"
+fi
+
+CONF="/etc/nginx/sites-available/$DOMAIN.conf"
+HTPASSWD_DIR="/etc/nginx/htpasswd"
+SAFE_PATH="$(echo "$PATH_TO_PROTECT" | sed 's#^/##; s#/$##; s#[^A-Za-z0-9_-]#_#g')"
+HTPASSWD_FILE="$HTPASSWD_DIR/$DOMAIN-$SAFE_PATH.htpasswd"
+
+if [[ ! -f "$CONF" ]]; then
+    echo "Error: Nginx config not found: $CONF"
+    exit 1
+fi
+
+if ! command -v htpasswd >/dev/null 2>&1; then
+    echo "Error: htpasswd not found."
+    echo "Install with:"
+    echo "  apt install apache2-utils"
+    exit 1
+fi
+
+read -rp "Username: " USERNAME
+
+if [[ -z "$USERNAME" ]]; then
+    echo "Error: username cannot be empty."
+    exit 1
+fi
+
+mkdir -p "$HTPASSWD_DIR"
+chmod 755 "$HTPASSWD_DIR"
+
+if [[ -f "$HTPASSWD_FILE" ]]; then
+    htpasswd "$HTPASSWD_FILE" "$USERNAME"
+else
+    htpasswd -c "$HTPASSWD_FILE" "$USERNAME"
+fi
+chmod 640 "$HTPASSWD_FILE"
+chown root:www-data "$HTPASSWD_FILE"
+
+if grep -q "# SITE-MANAGER-PROTECT-BEGIN: $PATH_TO_PROTECT" "$CONF"; then
+    echo "Error: path already appears to be protected in this config:"
+    echo "  $PATH_TO_PROTECT"
+    exit 1
+fi
+
+tmpfile="$(mktemp)"
+
+awk -v path="$PATH_TO_PROTECT" -v passwd="$HTPASSWD_FILE" '
+    BEGIN { inserted=0 }
+
+    /^}/ && inserted == 0 {
+        print ""
+        print "    # SITE-MANAGER-PROTECT-BEGIN: " path
+        print "    location " path " {"
+        print "        auth_basic \"Restricted\";"
+        print "        auth_basic_user_file " passwd ";"
+        print ""
+        print "        try_files $uri $uri/ " path "index.php?$query_string;"
+        print "    }"
+        print "    # SITE-MANAGER-PROTECT-END: " path
+        print ""
+        inserted=1
+    }
+
+    { print }
+' "$CONF" > "$tmpfile"
+
+cat "$tmpfile" > "$CONF"
+rm "$tmpfile"
+
+nginx -t
+systemctl reload nginx
+
+echo
+echo "Protection enabled."
+echo "Domain: $DOMAIN"
+echo "Path:   $PATH_TO_PROTECT"
+echo "File:   $HTPASSWD_FILE"

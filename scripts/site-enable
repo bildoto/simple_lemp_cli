@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: site-enable example.com"
+    exit 1
+fi
+
+CONF="/etc/nginx/sites-available/$DOMAIN.conf"
+LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
+
+if [[ ! -f "$CONF" ]]; then
+    echo "Error: site config not found: $CONF"
+    exit 1
+fi
+
+if [[ -L "$LINK" ]]; then
+    echo "Site is already enabled: $DOMAIN"
+    exit 0
+fi
+
+ln -s "$CONF" "$LINK"
+
+nginx -t
+systemctl reload nginx
+
+echo "Site enabled: $DOMAIN"

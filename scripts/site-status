@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+AVAILABLE_DIR="/etc/nginx/sites-available"
+ENABLED_DIR="/etc/nginx/sites-enabled"
+
+json_string() {
+    python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+service_status() {
+    local service="$1"
+
+    if systemctl is-active --quiet "$service"; then
+        echo "active"
+    else
+        echo "inactive"
+    fi
+}
+
+hostname="$(hostname)"
+uptime_pretty="$(uptime -p 2>/dev/null || true)"
+load_average="$(awk '{print $1" "$2" "$3}' /proc/loadavg)"
+disk_root="$(df -h / | awk 'NR==2 {print $5}')"
+memory_total="$(free -m | awk '/Mem:/ {print $2}')"
+memory_used="$(free -m | awk '/Mem:/ {print $3}')"
+
+nginx_status="$(service_status nginx)"
+mariadb_status="$(service_status mariadb)"
+fail2ban_status="$(service_status fail2ban)"
+
+php_service="$(systemctl list-units --type=service --all --no-legend 'php*-fpm.service' | awk '{print $1}' | head -n1)"
+php_status="not_found"
+
+if [[ -n "$php_service" ]]; then
+    php_status="$(service_status "$php_service")"
+fi
+
+active_sites=0
+inactive_sites=0
+suspended_sites=0
+site_entries=()
+
+if [[ -d "$AVAILABLE_DIR" ]]; then
+    for conf in "$AVAILABLE_DIR"/*.conf; do
+        [[ -e "$conf" ]] || continue
+
+        domain="$(basename "$conf" .conf)"
+        status="inactive"
+
+        if [[ -L "$ENABLED_DIR/$domain.conf" ]]; then
+            status="active"
+        fi
+
+        if grep -q "SITE-MANAGER-SUSPENDED" "$conf" 2>/dev/null; then
+            status="suspended"
+        fi
+
+        case "$status" in
+            active) active_sites=$((active_sites + 1)) ;;
+            inactive) inactive_sites=$((inactive_sites + 1)) ;;
+            suspended) suspended_sites=$((suspended_sites + 1)) ;;
+        esac
+
+        site_entries+=("$(printf '{"domain":%s,"status":%s}' \
+            "$(json_string "$domain")" \
+            "$(json_string "$status")")")
+    done
+fi
+
+sites_json="["
+for i in "${!site_entries[@]}"; do
+    if [[ "$i" -gt 0 ]]; then
+        sites_json+=","
+    fi
+    sites_json+="${site_entries[$i]}"
+done
+sites_json+="]"
+
+cat <<EOF
+{
+  "server": {
+    "hostname": $(json_string "$hostname"),
+    "uptime": $(json_string "$uptime_pretty"),
+    "load_average": $(json_string "$load_average"),
+    "disk_root_used": $(json_string "$disk_root"),
+    "memory_used_mb": $memory_used,
+    "memory_total_mb": $memory_total
+  },
+  "services": {
+    "nginx": $(json_string "$nginx_status"),
+    "php_fpm": $(json_string "$php_status"),
+    "mariadb": $(json_string "$mariadb_status"),
+    "fail2ban": $(json_string "$fail2ban_status")
+  },
+  "site_counts": {
+    "active": $active_sites,
+    "inactive": $inactive_sites,
+    "suspended": $suspended_sites
+  },
+  "sites": $sites_json
+}
+EOF

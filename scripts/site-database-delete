@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+SUFFIX="${2:-}"
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: site-database-delete example.com [suffix]"
+    exit 1
+fi
+
+BASE_DB="${DOMAIN//./_}"
+CRED_FILE="/root/site-credentials/$DOMAIN.txt"
+
+if [[ -z "$SUFFIX" ]]; then
+    mapfile -t DATABASES < <(
+        mysql -NBe "SHOW DATABASES;" |
+        awk -v base="$BASE_DB" '
+            index($0, base "_") == 1 {
+                print
+            }
+        ' | sort
+    )
+
+    echo
+    echo "Delete additional database for: $DOMAIN"
+    echo
+    echo "Primary database cannot be deleted here:"
+    echo "  $BASE_DB"
+    echo
+
+    if [[ ${#DATABASES[@]} -eq 0 ]]; then
+        echo "No additional databases found."
+        exit 0
+    fi
+
+    for i in "${!DATABASES[@]}"; do
+        db="${DATABASES[$i]}"
+        suffix="${db#${BASE_DB}_}"
+        printf "[%d] %s\n" "$((i + 1))" "$suffix"
+    done
+
+    echo "[0] Cancel"
+    echo
+
+    read -rp "Choose database: " choice
+
+    if [[ "$choice" == "0" ]]; then
+        echo "Cancelled."
+        exit 0
+    fi
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    index=$((choice - 1))
+
+    if [[ -z "${DATABASES[$index]:-}" ]]; then
+        echo "Invalid selection."
+        exit 1
+    fi
+
+    DB_NAME="${DATABASES[$index]}"
+else
+    SAFE_SUFFIX="$(echo "$SUFFIX" | tr '-' '_' | tr -cd '[:alnum:]_')"
+
+    if [[ -z "$SAFE_SUFFIX" ]]; then
+        echo "Error: invalid database suffix."
+        exit 1
+    fi
+
+    DB_NAME="${BASE_DB}_${SAFE_SUFFIX}"
+fi
+
+DB_USER="$DB_NAME"
+
+if [[ "$DB_NAME" == "$BASE_DB" ]]; then
+    echo "Error: primary database cannot be deleted with this tool."
+    echo "Use site-delete to remove the whole site."
+    exit 1
+fi
+
+if [[ "$DB_NAME" != "$BASE_DB"_* ]]; then
+    echo "Error: database does not belong to this site:"
+    echo "  $DB_NAME"
+    exit 1
+fi
+
+DB_EXISTS="$(mysql -NBe "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '$DB_NAME';")"
+
+if [[ -z "$DB_EXISTS" ]]; then
+    echo "Error: database not found: $DB_NAME"
+    exit 1
+fi
+
+USER_EXISTS="$(mysql -NBe "SELECT User FROM mysql.user WHERE User = '$DB_USER' AND Host = 'localhost';")"
+
+echo
+echo "Delete database:"
+echo "  $DB_NAME"
+echo
+echo "This will remove the database permanently."
+
+if [[ -n "$USER_EXISTS" ]]; then
+    echo
+    echo "A matching separate database user exists and will also be removed:"
+    echo "  $DB_USER"
+    DELETE_USER="yes"
+else
+    echo
+    echo "No matching separate database user found."
+    echo "Only the database will be removed."
+    DELETE_USER="no"
+fi
+
+echo
+read -rp "Type DELETE to continue: " confirm
+
+if [[ "$confirm" != "DELETE" ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+mysql <<EOF
+DROP DATABASE IF EXISTS \`$DB_NAME\`;
+EOF
+
+if [[ "$DELETE_USER" == "yes" ]]; then
+mysql <<EOF
+DROP USER IF EXISTS '$DB_USER'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+else
+mysql <<EOF
+FLUSH PRIVILEGES;
+EOF
+fi
+
+if [[ -f "$CRED_FILE" ]]; then
+    sed -i "/^### DATABASE-BEGIN: $DB_NAME$/,/^### DATABASE-END: $DB_NAME$/d" "$CRED_FILE"
+    echo "Credentials block removed if it existed."
+fi
+
+echo
+echo "Database deleted: $DB_NAME"
+
+if [[ "$DELETE_USER" == "yes" ]]; then
+    echo "Matching separate user deleted: $DB_USER"
+fi

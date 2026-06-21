@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DOMAIN="${1:-}"
+SUFFIX="${2:-}"
+
+if [[ -z "$DOMAIN" ]]; then
+    echo "Usage: site-database-create example.com suffix"
+    exit 1
+fi
+
+BASE_DB="${DOMAIN//./_}"
+PARENT_USER="$BASE_DB"
+
+if [[ -z "$SUFFIX" ]]; then
+    echo
+    echo "Create additional database for: $DOMAIN"
+    echo
+    echo "Primary database is not created here:"
+    echo "  $BASE_DB"
+    echo
+    read -rp "Database suffix: " SUFFIX
+fi
+
+SAFE_SUFFIX="$(echo "$SUFFIX" | tr '-' '_' | tr -cd '[:alnum:]_')"
+
+if [[ -z "$SAFE_SUFFIX" ]]; then
+    echo "Error: invalid database suffix."
+    exit 1
+fi
+
+DB_NAME="${BASE_DB}_${SAFE_SUFFIX}"
+SEPARATE_USER="$DB_NAME"
+
+echo
+echo "Database name:"
+echo "  $DB_NAME"
+echo
+echo "Use database user:"
+echo
+echo "[1] Existing parent user: $PARENT_USER"
+echo "[2] Create separate user: $SEPARATE_USER"
+echo "[0] Cancel"
+echo
+
+read -rp "Choose action: " action
+
+case "$action" in
+    1)
+        DB_USER="$PARENT_USER"
+        CREATE_USER="no"
+        ;;
+    2)
+        DB_USER="$SEPARATE_USER"
+        CREATE_USER="yes"
+        ;;
+    0)
+        echo "Cancelled."
+        exit 0
+        ;;
+    *)
+        echo "Invalid action."
+        exit 1
+        ;;
+esac
+
+DB_EXISTS="$(mysql -NBe "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '$DB_NAME';")"
+
+if [[ -n "$DB_EXISTS" ]]; then
+    echo "Error: database already exists: $DB_NAME"
+    exit 1
+fi
+
+USER_EXISTS="$(mysql -NBe "SELECT User FROM mysql.user WHERE User = '$DB_USER' AND Host = 'localhost';")"
+
+if [[ "$CREATE_USER" == "no" && -z "$USER_EXISTS" ]]; then
+    echo "Error: parent database user does not exist: $DB_USER"
+    exit 1
+fi
+
+DB_PASS=""
+
+if [[ "$CREATE_USER" == "yes" ]]; then
+    if [[ -n "$USER_EXISTS" ]]; then
+        echo "Error: database user already exists: $DB_USER"
+        exit 1
+    fi
+
+    DB_PASS="$(openssl rand -base64 24)"
+fi
+
+echo
+echo "This will create:"
+echo "  Database: $DB_NAME"
+echo "  User:     $DB_USER"
+echo
+
+read -rp "Type CREATE to continue: " confirm
+
+if [[ "$confirm" != "CREATE" ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+mysql <<EOF
+CREATE DATABASE \`$DB_NAME\`
+  CHARACTER SET utf8mb4
+  COLLATE utf8mb4_unicode_ci;
+EOF
+
+if [[ "$CREATE_USER" == "yes" ]]; then
+mysql <<EOF
+CREATE USER '$DB_USER'@'localhost'
+IDENTIFIED BY '$DB_PASS';
+EOF
+fi
+
+mysql <<EOF
+GRANT ALL PRIVILEGES
+ON \`$DB_NAME\`.*
+TO '$DB_USER'@'localhost';
+
+FLUSH PRIVILEGES;
+EOF
+
+echo
+echo "Database created."
+echo "Database: $DB_NAME"
+echo "User:     $DB_USER"
+
+if [[ "$CREATE_USER" == "yes" ]]; then
+    echo "Password: $DB_PASS"
+fi
+
+if [[ "$CREATE_USER" == "yes" ]]; then
+    CRED_FILE="/root/site-credentials/$DOMAIN.txt"
+
+    if [[ -f "$CRED_FILE" ]]; then
+        cat >> "$CRED_FILE" <<EOF
+
+### DATABASE-BEGIN: $DB_NAME
+Additional database created: $(date '+%Y-%m-%d %H:%M:%S')
+
+Database: $DB_NAME
+DB user:  $DB_USER
+DB pass:  $DB_PASS
+DB host:  localhost
+### DATABASE-END: $DB_NAME
+EOF
+
+        chmod 600 "$CRED_FILE"
+    fi
+fi
