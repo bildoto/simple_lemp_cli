@@ -20,6 +20,8 @@ SCRIPTS=(
   site-dns
   site-protect
   site-unprotect
+  site-protect-user-add
+  site-protect-user-remove
   site-status
   site-check
 )
