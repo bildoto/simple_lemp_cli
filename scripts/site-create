@@ -82,7 +82,7 @@ echo "Creating Nginx config..."
 cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
-    server_name $DOMAIN www.$DOMAIN;
+    server_name $DOMAIN;
 
     root $PUBLIC_ROOT;
     index index.php index.html;
