@@ -111,7 +111,7 @@ nginx -t
 systemctl reload nginx
 
 echo "Requesting Let's Encrypt certificate..."
-certbot --nginx -d "$DOMAIN" -d "www.$DOMAIN"
+certbot --nginx -d "$DOMAIN"
 
 echo
 echo "Site created."
@@ -153,17 +153,13 @@ echo
 
 if [[ -n "$SERVER_IPV4" ]]; then
     printf "%-35s %-6s %s\n" "$DOMAIN." "A" "$SERVER_IPV4"
-    printf "%-35s %-6s %s\n" "www.$DOMAIN." "A" "$SERVER_IPV4"
 fi
 
 if [[ -n "$SERVER_IPV6" ]]; then
     printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "$SERVER_IPV6"
-    printf "%-35s %-6s %s\n" "www.$DOMAIN." "AAAA" "$SERVER_IPV6"
 fi
 
 if [[ -z "$SERVER_IPV4" && -z "$SERVER_IPV6" ]]; then
     printf "%-35s %-6s %s\n" "$DOMAIN." "A" "SERVER_IPV4"
-    printf "%-35s %-6s %s\n" "www.$DOMAIN." "A" "SERVER_IPV4"
     printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "SERVER_IPV6"
-    printf "%-35s %-6s %s\n" "www.$DOMAIN." "AAAA" "SERVER_IPV6"
 fi
