@@ -4,112 +4,125 @@ set -euo pipefail
 DOMAIN="${1:-}"
 PATH_TO_REMOVE="${2:-}"
 
-if [[ -z "$DOMAIN" ]]; then
-    echo "Usage: site-unprotect example.com [path]"
+if [[ -z "$DOMAIN" || ! "$DOMAIN" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ || "$DOMAIN" == *..* ]]; then
+    echo 'Usage: site-unprotect example.com [path]' >&2
     exit 1
 fi
 
 CONF="/etc/nginx/sites-available/$DOMAIN.conf"
 HTPASSWD_DIR="/etc/nginx/htpasswd"
-
-if [[ ! -f "$CONF" ]]; then
-    echo "Error: Nginx config not found: $CONF"
-    exit 1
-fi
+[[ -f "$CONF" ]] || { echo "Error: Nginx config not found: $CONF" >&2; exit 1; }
 
 if [[ -z "$PATH_TO_REMOVE" ]]; then
-    mapfile -t PROTECTED_PATHS < <(
-        grep "^    # SITE-MANAGER-PROTECT-BEGIN:" "$CONF" |
-        sed 's/^    # SITE-MANAGER-PROTECT-BEGIN: //'
-    )
-
+    mapfile -t PROTECTED_PATHS < <(sed -n 's/^    # SITE-MANAGER-PROTECT-BEGIN: //p' "$CONF")
     echo
     echo "Protected paths for: $DOMAIN"
     echo
-
-    if [[ ${#PROTECTED_PATHS[@]} -eq 0 ]]; then
-        echo "No protected paths found."
+    if (( ${#PROTECTED_PATHS[@]} == 0 )); then
+        echo 'No protected paths found.'
         exit 0
     fi
-
     for i in "${!PROTECTED_PATHS[@]}"; do
-        printf "[%d] %s\n" "$((i + 1))" "${PROTECTED_PATHS[$i]}"
+        printf '[%d] %s\n' "$((i + 1))" "${PROTECTED_PATHS[$i]}"
     done
-
-    echo "[0] Cancel"
+    echo '[0] Cancel'
     echo
-
-    read -rp "Choose path: " choice
-
-    if [[ "$choice" == "0" ]]; then
-        echo "Cancelled."
+    read -rp 'Choose path: ' choice
+    [[ "$choice" =~ ^[0-9]+$ ]] || { echo 'Invalid selection.' >&2; exit 1; }
+    if (( 10#$choice == 0 )); then
+        echo 'Cancelled.'
         exit 0
     fi
-
-    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
-        echo "Invalid selection."
+    index=$((10#$choice - 1))
+    if (( index < 0 || index >= ${#PROTECTED_PATHS[@]} )); then
+        echo 'Invalid selection.' >&2
         exit 1
     fi
-
-    index=$((choice - 1))
-
-    if [[ -z "${PROTECTED_PATHS[$index]:-}" ]]; then
-        echo "Invalid selection."
-        exit 1
-    fi
-
     PATH_TO_REMOVE="${PROTECTED_PATHS[$index]}"
 fi
 
-if [[ "$PATH_TO_REMOVE" != /* ]]; then
-    echo "Error: path must start with /"
+if [[ "$PATH_TO_REMOVE" != /* || "$PATH_TO_REMOVE" == *$'\n'* || "$PATH_TO_REMOVE" == *$'\r'* ]]; then
+    echo 'Error: invalid path.' >&2
     exit 1
 fi
+[[ "$PATH_TO_REMOVE" == */ ]] || PATH_TO_REMOVE+='/'
 
-if [[ "$PATH_TO_REMOVE" != */ ]]; then
-    PATH_TO_REMOVE="$PATH_TO_REMOVE/"
-fi
-
-SAFE_PATH="$(echo "$PATH_TO_REMOVE" | sed 's#^/##; s#/$##; s#[^A-Za-z0-9_-]#_#g')"
+SAFE_PATH="$(printf '%s' "$PATH_TO_REMOVE" | sed 's#^/##; s#/$##; s#[^A-Za-z0-9_-]#_#g')"
 HTPASSWD_FILE="$HTPASSWD_DIR/$DOMAIN-$SAFE_PATH.htpasswd"
 
-if ! grep -q "^    # SITE-MANAGER-PROTECT-BEGIN: $PATH_TO_REMOVE$" "$CONF"; then
-    echo "Error: protected block not found for path:"
-    echo "  $PATH_TO_REMOVE"
+# Validate the markers before making any changes. This allows nested nginx
+# location blocks inside the marked section without parsing nginx braces.
+if ! awk -v path="$PATH_TO_REMOVE" '
+    BEGIN { begin="    # SITE-MANAGER-PROTECT-BEGIN: " path; end="    # SITE-MANAGER-PROTECT-END: " path; open=0; starts=0; ends=0; bad=0 }
+    $0 == begin { starts++; if (open) bad=1; open=1; next }
+    $0 == end { ends++; if (!open) bad=1; open=0; next }
+    END { if (starts != 1 || ends != 1 || open || bad) exit 1 }
+' "$CONF"; then
+    echo "Error: expected exactly one complete protection block for $PATH_TO_REMOVE." >&2
+    exit 1
+fi
+
+# Fail safely if any other protection block is already malformed.
+if ! awk '
+    /# SITE-MANAGER-PROTECT-BEGIN:/ { if (open) bad=1; open=1; next }
+    /# SITE-MANAGER-PROTECT-END:/ { if (!open) bad=1; open=0; next }
+    END { if (open || bad) exit 1 }
+' "$CONF"; then
+    echo 'Error: malformed or overlapping protection markers in configuration.' >&2
     exit 1
 fi
 
 echo
-echo "Remove protection:"
+echo 'Remove protection:'
 echo "  Domain: $DOMAIN"
 echo "  Path:   $PATH_TO_REMOVE"
+echo '  WARNING: this makes the path publicly accessible unless protected elsewhere.'
 echo
-read -rp "Type REMOVE to continue: " confirm
+read -rp 'Type REMOVE to continue: ' confirm
+[[ "$confirm" == 'REMOVE' ]] || { echo 'Aborted.'; exit 0; }
 
-if [[ "$confirm" != "REMOVE" ]]; then
-    echo "Aborted."
-    exit 0
-fi
-
-tmpfile="$(mktemp)"
+# Back up in the same directory so the replacement is atomic and metadata can
+# be preserved. Keep the backup until nginx has tested and reloaded successfully.
+backup="$(mktemp "${CONF}.backup.XXXXXXXX")"
+candidate="$(mktemp "${CONF}.candidate.XXXXXXXX")"
+cp -a "$CONF" "$backup"
+restore_on_failure() {
+    cp -a "$backup" "$CONF"
+    nginx -t >/dev/null 2>&1 || echo 'WARNING: restored config also fails nginx -t.' >&2
+    echo 'Error: previous configuration restored. Password file not deleted.' >&2
+}
+cleanup() { rm -f "$backup" "$candidate"; }
+trap cleanup EXIT
 
 awk -v path="$PATH_TO_REMOVE" '
     $0 == "    # SITE-MANAGER-PROTECT-BEGIN: " path { skip=1; next }
     $0 == "    # SITE-MANAGER-PROTECT-END: " path { skip=0; next }
-    skip != 1 { print }
-' "$CONF" > "$tmpfile"
-
-cat "$tmpfile" > "$CONF"
-rm "$tmpfile"
-
-if [[ -f "$HTPASSWD_FILE" ]]; then
-    rm "$HTPASSWD_FILE"
+    !skip { print }
+' "$CONF" > "$candidate"
+chmod --reference="$CONF" "$candidate"
+chown --reference="$CONF" "$candidate"
+# Candidate must be installed temporarily for nginx -t to evaluate it.
+cp -a "$candidate" "$CONF"
+if ! nginx -t; then
+    restore_on_failure
+    exit 1
+fi
+if ! systemctl reload nginx; then
+    restore_on_failure
+    exit 1
 fi
 
-nginx -t
-systemctl reload nginx
+# Delete password file only after the configuration has been accepted. Do not
+# delete it if another server config still refers to the same file.
+if [[ -f "$HTPASSWD_FILE" ]]; then
+    if grep -Fql -- "$HTPASSWD_FILE" /etc/nginx/sites-available/*.conf; then
+        echo "Password file retained (still referenced): $HTPASSWD_FILE"
+    else
+        rm -- "$HTPASSWD_FILE"
+    fi
+fi
 
 echo
-echo "Protection removed."
+echo 'Protection removed.'
 echo "Domain: $DOMAIN"
 echo "Path:   $PATH_TO_REMOVE"
