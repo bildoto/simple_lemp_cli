@@ -22,3 +22,7 @@ Create the directory /status/ in /srv/www/example.com/public/ first, then
 ```
 cp /opt/simple-lemp-cli/status/index.php /srv/www/example.com/public/status/index.php
 ```
+
+#### Caveat!
+
+If you are running on Azure, the site-dns script will show the internal ip.
