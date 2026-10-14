@@ -53,19 +53,32 @@ show_one() {
  printf '%-38s %-19s %s\n' "$db" "$user" "$level"
 }
 if [[ $action == list ]]; then
- printf '%-38s %-19s %s\n' DATABASE USER LEVEL
+ # Size columns from the actual names, rather than assuming all DB users
+ # follow the short site-account naming scheme.
+ db_width=8
+ user_width=4
  needs_review=no
+ rows=()
  for entry in "${entries[@]}"; do
    IFS=$'\t' read -r db user <<< "$entry"
    level=$(status_one "$db" "$user") || fail "Cannot inspect grants for $user"
-   printf '%-38s %-19s %s\n' "$db" "$user" "$level"
+   rows+=("$db"$'\t'"$user"$'\t'"$level")
+   (( ${#db} > db_width )) && db_width=${#db}
+   (( ${#user} > user_width )) && user_width=${#user}
    if [[ $level == CUSTOM || $level == NONE ]]; then needs_review=yes; fi
+ done
+ ((db_width+=2, user_width+=2))
+ printf '%-*s %-*s %s\n' "$db_width" DATABASE "$user_width" USER LEVEL
+ for entry in "${rows[@]}"; do
+   IFS=$'\t' read -r db user level <<< "$entry"
+   printf '%-*s %-*s %s\n' "$db_width" "$db" "$user_width" "$user" "$level"
  done
  if [[ $needs_review == yes ]]; then
    echo 'WARNING: CUSTOM/NONE privileges require manual review; other grant scopes are not modified.'
  fi
  exit 0
 fi
+
 requested=${3:-}
 if [[ -z $requested ]]; then
  echo 'Databases for this site:'

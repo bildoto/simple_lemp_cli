@@ -195,7 +195,7 @@ site_menu() {
         echo "[6]  Password protect path"
         echo "[7]  Remove password protection"
         echo "[8]  Add protection user"
-        echo "[9] Remove protection user"
+        echo "[9]  Remove protection user"
         echo "[10] Delete site"
         echo "[11] Configure / retry Let's Encrypt SSL"
         echo "[12] Site identity / information"
