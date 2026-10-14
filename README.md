@@ -38,6 +38,14 @@ The site is created under `/srv/www/example.com`, with an isolated PHP-FPM pool,
 
 Each site has three Nginx configuration includes under `/etc/nginx/site-manager/example.com/`: `protection.conf`, `routes.conf`, `php.conf` in that order. Certificates are managed by Certbot's Nginx installer. **Review application routing and equivalent Apache `.htaccess` restrictions before publishing**. Protected PHP endpoints use exact locations; protected directories use `^~` with a nested PHP handler. Test protected URLs and alternative application routes. Config editing is validated via `nginx -t`.
 
+## Manage databases
+
+From `sudo site`, select a website and choose **Manage databases**. The menu displays each database’s live privilege level at the top, along with creation/deletion and a single privilege toggle for the selected database. The same account may own several site databases; permissions are adjusted **per database**, not globally.
+
+New primary and additional databases start restricted to `SELECT`, `INSERT`, `UPDATE`, and `DELETE`. For installation and migrations, use **Change database privilege level** to elevate, and select it again afterward to restrict. Elevation grants `ALL PRIVILEGES` only on the selected database, never globally or with `GRANT OPTION`. The command requires an explicit confirmation. These database-level operations do not remove any independently granted global or table-specific privileges; review unusual/custom grants separately.
+
+Command-line automation is also available through `sudo site database-privileges example.com list|toggle|elevate|restrict [database]`.
+
 ## Databases
 
 Additional databases are recorded explicitly in `/etc/site-manager/sites/example.com.databases` (tab-separated database, username, separate-user flag), not inferred from name prefixes. They can share the main site DB user or use a separate user. The separate account grants privileges only to its own database. Site deletion checks this registry. Avoid modifying it manually.

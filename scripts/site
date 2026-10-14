@@ -152,6 +152,34 @@ list_sites() {
     done
 }
 
+database_menu() {
+    local domain="$1" action
+    while true; do
+        echo
+        echo "Manage databases — $domain"
+        # Current states are queried from MariaDB on every menu refresh.
+        if ! site-database-privileges "$domain" list; then
+            echo 'Unable to determine database privileges; management disabled.'
+            return 1
+        fi
+        echo
+        echo "[1] Create additional database"
+        echo "[2] Delete additional database"
+        echo "[3] Change database privilege level (RESTRICTED ↔ ELEVATED)"
+        echo "[0] Back"
+        read -rp "Choose action: " action
+        case "$action" in
+            1) site-database-create "$domain" ;;
+            2) site-database-delete "$domain" ;;
+            3) site-database-privileges "$domain" toggle ;;
+            0|b|back) return ;;
+            *) echo "Invalid action." ;;
+        esac
+        echo
+        read -rp "Press Enter to continue..."
+    done
+}
+
 site_menu() {
     local domain="$1"
 
@@ -162,16 +190,15 @@ site_menu() {
         echo "[1]  Enable"
         echo "[2]  Disable"
         echo "[3]  Show credentials"
-        echo "[4]  Create database"
-        echo "[5]  Delete database"
-        echo "[6]  Show DNS records"
-        echo "[7]  Password protect path"
-        echo "[8]  Remove password protection"
-        echo "[9]  Add protection user"
-        echo "[10] Remove protection user"
-        echo "[11] Delete site"
-        echo "[12] Configure / retry Let's Encrypt SSL"
-        echo "[13] Site identity / information"
+        echo "[4]  Manage databases"
+        echo "[5]  Show DNS records"
+        echo "[6]  Password protect path"
+        echo "[7]  Remove password protection"
+        echo "[8]  Add protection user"
+        echo "[9] Remove protection user"
+        echo "[10] Delete site"
+        echo "[11] Configure / retry Let's Encrypt SSL"
+        echo "[12] Site identity / information"
         echo "[0]  Back"
         echo
 
@@ -188,30 +215,27 @@ site_menu() {
                 site-credentials "$domain"
                 ;;
             4)
-                site-database-create "$domain"
+                database_menu "$domain"
                 ;;
             5)
-                site-database-delete "$domain"
-                ;;
-            6)
                 site-dns "$domain"
                 ;;
-            7)
+            6)
                 read -rp "Path to protect, for example /status/: " protect_path
                 site-protect "$domain" "$protect_path"
                 ;;
-            8)
+            7)
                 site-unprotect "$domain"
                 ;;
-            9)
+            8)
                 read -rp "Protected path, for example /status/: " protect_path
                 site-protect-user-add "$domain" "$protect_path"
                 ;;
-            10)
+            9)
                 read -rp "Protected path, for example /status/: " protect_path
                 site-protect-user-remove "$domain" "$protect_path"
                 ;;
-            11)
+            10)
                 echo
                 echo "Deletion options for $domain:"
                 echo "[1] Preview resources only"
@@ -244,10 +268,10 @@ site_menu() {
                     *) echo "Invalid selection." ;;
                 esac
                 ;;
-            12)
+            11)
                 site-ssl "$domain"
                 ;;
-            13)
+            12)
                 site-info "$domain"
                 ;;
             0|b|back)
@@ -286,6 +310,9 @@ case "${1:-}" in
     credentials)
         site-credentials "${2:-}"
         ;;
+    database-privileges|db-privileges)
+        site-database-privileges "${2:-}" "${3:-list}" "${4:-}"
+        ;;
     database-create|db-create)
         site-database-create "${2:-}" "${3:-}"
         ;;
@@ -320,6 +347,7 @@ case "${1:-}" in
         echo "  site disable example.com"
         echo "  site delete example.com"
         echo "  site credentials example.com"
+        echo "  site database-privileges example.com list|elevate|restrict [database]"
         echo "  site database-create example.com logs"
         echo "  site database-delete example.com logs"
 		echo "  site dns example.com"

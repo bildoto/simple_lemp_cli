@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -ge 2 && $# -le 3 ]] || fail 'Usage: site-database-privileges DOMAIN list|toggle|elevate|restrict [DATABASE]'
+load_site "$1"
+action=$2
+[[ $action == list || $action == toggle || $action == elevate || $action == restrict ]] || fail 'Use list, toggle, elevate, or restrict'
+registry=$(extra_registry)
+# Database/account pairs may be shared across a site's additional databases.
+entries=("$DB_NAME"$'\t'"$SITE_USER")
+if [[ -f $registry ]]; then
+  while IFS=$'\t' read -r db user separate; do
+    [[ -n $db ]] || continue
+    [[ $db =~ ^[a-z0-9_]{1,64}$ && $user =~ ^[a-z0-9_]{1,64}$ && ( $separate == yes || $separate == no ) ]] || fail 'Invalid additional database registry'
+    entries+=("$db"$'\t'"$user")
+  done < "$registry"
+fi
+# Evaluate the actual grants, not a cached state. Treat custom/granular grants as
+# CUSTOM and refuse to toggle them automatically.
+status_one() {
+ local db=$1 user=$2 grants dbgrants priv
+ grants=$(mysql --batch --skip-column-names -e "SHOW GRANTS FOR '$user'@'localhost';") || return 1
+ # Global USAGE (login) is normal; other global/table grants are not.
+ if printf '%s\n' "$grants" | grep -E '^GRANT .+ ON \*\.\* TO ' | grep -Ev '^GRANT USAGE ON \*\.\* TO ' | grep -q .; then
+    printf '%s' CUSTOM; return
+ fi
+ # Extra grants on tables in this database must not be concealed.
+ if printf '%s\n' "$grants" | grep -F "ON \`$db\`.\`" | grep -q .; then
+    printf '%s' CUSTOM; return
+ fi
+ dbgrants=$(printf '%s\n' "$grants" | grep -F "ON \`$db\`.* TO " || true)
+ [[ -n $dbgrants ]] || dbgrants=$(printf '%s\n' "$grants" | grep -F "ON $db.* TO " || true)
+ if [[ $dbgrants == *'ALL PRIVILEGES'* && $dbgrants != *'WITH GRANT OPTION'* ]]; then
+    printf '%s' ELEVATED
+ elif [[ -n $dbgrants ]]; then
+    priv=$(printf '%s\n' "$dbgrants" | sed -nE 's/^GRANT (.*) ON .* TO .*/\1/p' | tr -d ' ')
+    # Normalize privileges irrespective of their printed order.
+    local sorted
+    sorted=$(printf '%s' "$priv" | tr ',' '\n' | LC_ALL=C sort -u | paste -sd, -)
+    if [[ $sorted == 'DELETE,INSERT,SELECT,UPDATE' && $priv != *'GRANTOPTION'* ]]; then
+       printf '%s' RESTRICTED
+    else
+       printf '%s' CUSTOM
+    fi
+ else
+    printf '%s' NONE
+ fi
+}
+show_one() {
+ local db=$1 user=$2 level
+ level=$(status_one "$db" "$user") || fail "Cannot inspect grants for $user"
+ printf '%-38s %-19s %s\n' "$db" "$user" "$level"
+}
+if [[ $action == list ]]; then
+ printf '%-38s %-19s %s\n' DATABASE USER LEVEL
+ for entry in "${entries[@]}"; do IFS=$'\t' read -r db user <<< "$entry"; show_one "$db" "$user"; done
+ echo 'CUSTOM/NONE must be reviewed manually. Other grant scopes are not modified.'
+ exit 0
+fi
+requested=${3:-}
+if [[ -z $requested ]]; then
+ echo 'Databases for this site:'
+ for i in "${!entries[@]}"; do IFS=$'\t' read -r db user <<< "${entries[i]}"; printf '[%d] %s (%s)\n' "$((i+1))" "$db" "$user"; done
+ read -rp 'Select database (0=cancel): ' choice
+ [[ $choice =~ ^[0-9]+$ ]] || fail 'Invalid selection'
+ ((10#$choice > 0 && 10#$choice <= ${#entries[@]})) || exit 0
+ IFS=$'\t' read -r db user <<< "${entries[10#$choice-1]}"
+else
+ [[ $requested =~ ^[a-z0-9_]{1,64}$ ]] || fail 'Invalid database name'
+ db=''; user=''
+ for entry in "${entries[@]}"; do
+  IFS=$'\t' read -r candidate account <<< "$entry"
+  if [[ $candidate == "$requested" ]]; then db=$candidate; user=$account; break; fi
+ done
+ [[ -n $db ]] || fail 'Database not registered to site'
+fi
+current=$(status_one "$db" "$user") || fail "Could not inspect grants for $user"
+if [[ $action == toggle ]]; then
+ case $current in
+   RESTRICTED) action=elevate ;;
+   ELEVATED) action=restrict ;;
+   *) fail "Current grants are $current; refusing automatic changes. Inspect SHOW GRANTS first." ;;
+ esac
+fi
+[[ $current == RESTRICTED || $current == ELEVATED ]] || fail "Current grants are $current; refusing to overwrite custom grants"
+if [[ $action == elevate && $current == ELEVATED || $action == restrict && $current == RESTRICTED ]]; then
+ echo "Already $current: $db"; exit 0
+fi
+# Avoid silently changing an account with unexpected privileges from elsewhere.
+mysql --batch --skip-column-names -e "SHOW GRANTS FOR '$user'@'localhost';" >/dev/null || fail 'Missing database account'
+if [[ $action == elevate ]]; then
+ echo "Elevate $user on $db to ALL database privileges (no GRANT OPTION)."
+else
+ echo "Restrict $user on $db to SELECT, INSERT, UPDATE, DELETE."
+ echo 'Schema changes/migrations may stop working until privileges are elevated again.'
+fi
+read -rp "Type $action to confirm: " confirmation
+[[ $confirmation == "$action" ]] || { echo 'Cancelled'; exit 0; }
+# MariaDB uses REVOKE ALL PRIVILEGES ON db.* to remove previously granted schema privileges.
+# Global/table-level grants are not modified by this command and should never be assigned by Site Manager.
+mysql -e "REVOKE ALL PRIVILEGES ON \`$db\`.* FROM '$user'@'localhost';"
+if [[ $action == elevate ]]; then
+ mysql -e "GRANT ALL PRIVILEGES ON \`$db\`.* TO '$user'@'localhost';"
+else
+ mysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON \`$db\`.* TO '$user'@'localhost';"
+fi
+printf 'Updated: %s on %s\n' "$user" "$db"

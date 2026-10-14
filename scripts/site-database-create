@@ -24,7 +24,7 @@ read -rp "Create $DB_EXTRA for $DOMAIN? Type CREATE: " yes
 [[ $yes == CREATE ]] || exit 0
 mysql -e "CREATE DATABASE \`$DB_EXTRA\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 if [[ $separate == yes ]]; then mysql -e "CREATE USER '$user'@'localhost' IDENTIFIED BY '$pass';"; fi
-mysql -e "GRANT ALL PRIVILEGES ON \`$DB_EXTRA\`.* TO '$user'@'localhost';"
+mysql -e "GRANT SELECT, INSERT, UPDATE, DELETE ON \`$DB_EXTRA\`.* TO '$user'@'localhost';"
 printf '%s\t%s\t%s\n' "$DB_EXTRA" "$user" "$separate" >> "$(extra_registry)"
 if [[ $separate == yes ]]; then
  cat >> "$CRED_FILE" <<CRED
