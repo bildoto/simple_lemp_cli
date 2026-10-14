@@ -18,7 +18,7 @@ case "$choice" in
  1) user="$SITE_USER"; separate=no; pass='';;
  2) user=$(short_db_name "${SITE_USER}_${suffix}"); separate=yes; pass=$(openssl rand -hex 24)
     [[ $(mysql -NBe "SELECT COUNT(*) FROM mysql.user WHERE User='$user' AND Host='localhost'") == 0 ]] || fail 'Account exists';;
- *) fail 'Invalid selection';;
+ *) echo 'Invalid selection. Database creation cancelled.'; exit 0;;
 esac
 read -rp "Create $DB_EXTRA for $DOMAIN? Type CREATE: " yes
 [[ $yes == CREATE ]] || exit 0

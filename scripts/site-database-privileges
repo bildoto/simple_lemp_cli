@@ -54,8 +54,16 @@ show_one() {
 }
 if [[ $action == list ]]; then
  printf '%-38s %-19s %s\n' DATABASE USER LEVEL
- for entry in "${entries[@]}"; do IFS=$'\t' read -r db user <<< "$entry"; show_one "$db" "$user"; done
- echo 'CUSTOM/NONE must be reviewed manually. Other grant scopes are not modified.'
+ needs_review=no
+ for entry in "${entries[@]}"; do
+   IFS=$'\t' read -r db user <<< "$entry"
+   level=$(status_one "$db" "$user") || fail "Cannot inspect grants for $user"
+   printf '%-38s %-19s %s\n' "$db" "$user" "$level"
+   if [[ $level == CUSTOM || $level == NONE ]]; then needs_review=yes; fi
+ done
+ if [[ $needs_review == yes ]]; then
+   echo 'WARNING: CUSTOM/NONE privileges require manual review; other grant scopes are not modified.'
+ fi
  exit 0
 fi
 requested=${3:-}
