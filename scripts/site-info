@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+[[ $# -eq 1 ]] || fail 'Usage: site-info domain.example'
+load_site "$1"
+printf 'Domain:        %s\nIdentity:      %s\nDatabase:      %s\nWeb root:      %s\nPublic root:   %s\nPHP-FPM pool:  %s\nNginx config:  %s\n' "$DOMAIN" "$SITE_USER" "$DB_NAME" "$WEB_ROOT" "$PUBLIC_ROOT" "$FPM_CONF" "$NGX_CONF"
+for p in "$WEB_ROOT" "$NGX_CONF" "$NGX_LINK" "$FPM_CONF" "$INC_DIR"; do if [[ -e $p || -L $p ]]; then printf 'EXISTS  %s\n' "$p"; else printf 'MISSING %s\n' "$p"; fi; done

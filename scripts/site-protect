@@ -1,138 +1,47 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-DOMAIN="${1:-}"
-PATH_TO_PROTECT="${2:-}"
-
-if [[ -z "$DOMAIN" || -z "$PATH_TO_PROTECT" ]]; then
-    echo "Usage: site-protect example.com /status/" >&2
-    exit 1
-fi
-
-if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || [[ "$DOMAIN" == *..* ]]; then
-    echo "Error: invalid domain." >&2
-    exit 1
-fi
-
-if [[ "$PATH_TO_PROTECT" != /* ]]; then
-    echo "Error: path must start with /." >&2
-    exit 1
-fi
-
-[[ "$PATH_TO_PROTECT" == */ ]] || PATH_TO_PROTECT+="/"
-
-if [[ "$PATH_TO_PROTECT" == "/" || ! "$PATH_TO_PROTECT" =~ ^/([A-Za-z0-9_-]+/)+$ ]]; then
-    echo "Error: specify a directory path such as /status/ (letters, digits, _ and - only)." >&2
-    exit 1
-fi
-
-CONF="/etc/nginx/sites-available/$DOMAIN.conf"
-HTPASSWD_DIR="/etc/nginx/htpasswd"
-SAFE_PATH="${PATH_TO_PROTECT#/}"
-SAFE_PATH="${SAFE_PATH%/}"
-SAFE_PATH="${SAFE_PATH//\//_}"
-HTPASSWD_FILE="$HTPASSWD_DIR/$DOMAIN-$SAFE_PATH.htpasswd"
-MARKER="# SITE-MANAGER-PROTECT-BEGIN: $PATH_TO_PROTECT"
-
-[[ -f "$CONF" ]] || { echo "Error: Nginx config not found: $CONF" >&2; exit 1; }
-if grep -Fq "$MARKER" "$CONF"; then
-    echo "Error: path already appears protected: $PATH_TO_PROTECT" >&2
-    exit 1
-fi
-command -v htpasswd >/dev/null || { echo "Error: htpasswd missing (apt install apache2-utils)." >&2; exit 1; }
-command -v nginx >/dev/null || { echo "Error: nginx missing." >&2; exit 1; }
-
-# Nested PHP blocks require the protected prefix to be encountered first.
-# Ensure the site has the expected PHP handling pattern.
-if ! grep -Eq '^[[:space:]]*location[[:space:]]+~[[:space:]]+\\\.php\$[[:space:]]*\{' "$CONF"; then
-    echo "Error: expected generic 'location ~ \\.php$' not found; inspect configuration manually." >&2
-    exit 1
-fi
-
-read -rp "Username: " USERNAME
-[[ -n "$USERNAME" ]] || { echo "Error: username cannot be empty." >&2; exit 1; }
-
-# Keep a rollback copy of both files before making any changes.
-conf_backup="$(mktemp "${CONF}.backup.XXXXXX")"
-cp -p "$CONF" "$conf_backup"
-passwd_existed=0
-passwd_backup=""
-if [[ -e "$HTPASSWD_FILE" ]]; then
-    passwd_existed=1
-    passwd_backup="$(mktemp "${HTPASSWD_FILE}.backup.XXXXXX")"
-    cp -p "$HTPASSWD_FILE" "$passwd_backup"
-fi
-
-rollback() {
-    local rc=$?
-    trap - EXIT
-    if (( rc != 0 )); then
-        cp -p "$conf_backup" "$CONF"
-        if (( passwd_existed )); then
-            cp -p "$passwd_backup" "$HTPASSWD_FILE"
-        else
-            rm -f "$HTPASSWD_FILE"
-        fi
-        echo "Error: operation failed; configuration and password file restored." >&2
-    fi
-    rm -f "$conf_backup"
-    [[ -z "$passwd_backup" ]] || rm -f "$passwd_backup"
-    exit "$rc"
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -ge 2 ]] || fail 'Usage: site-protect domain /path/ [username]'
+load_site "$1"; endpoint="$2"; username="${3:-}"
+[[ "$endpoint" =~ ^/([A-Za-z0-9_-]+/)+$ || "$endpoint" =~ ^/[A-Za-z0-9_-]+\.php$ ]] || fail 'Only simple directory paths (/status/) or root PHP files (/admin.php) are supported'
+[[ -f "$INC_DIR/protection.conf" ]] || fail 'Missing protection.conf'
+safe=${endpoint#/}; safe=${safe//\//_}; safe=${safe%.php}; safe=${safe%_}
+[[ $safe =~ ^[A-Za-z0-9_-]+$ ]] || fail 'Invalid path'
+authdir=/etc/nginx/htpasswd; authfile="$authdir/$DOMAIN-$safe.htpasswd"
+command -v htpasswd >/dev/null || fail 'apache2-utils is required'
+if [[ -z $username ]]; then read -rp 'Basic Auth username: ' username; fi
+[[ $username =~ ^[A-Za-z0-9_.-]+$ ]] || fail 'Invalid username'
+marker="# SITE-MANAGER-PROTECT-BEGIN: $endpoint"
+! grep -Fxq "$marker" "$INC_DIR/protection.conf" || fail 'Already protected'
+mkdir -p "$authdir"; chmod 755 "$authdir"
+if [[ -f $authfile ]]; then htpasswd -B "$authfile" "$username"; else htpasswd -cB "$authfile" "$username"; fi
+chown root:www-data "$authfile"; chmod 640 "$authfile"
+cfg="$INC_DIR/protection.conf"; cp -p "$cfg" "$cfg.backup"
+if [[ $endpoint == *.php ]]; then
+ cat >> "$cfg" <<NGINX
+$marker
+location = $endpoint {
+    auth_basic "Restricted";
+    auth_basic_user_file $authfile;
+    include snippets/fastcgi-php.conf;
+    fastcgi_pass unix:$SOCKET;
 }
-trap rollback EXIT
-
-install -d -m 755 "$HTPASSWD_DIR"
-if (( passwd_existed )); then
-    htpasswd "$HTPASSWD_FILE" "$USERNAME"
+# SITE-MANAGER-PROTECT-END: $endpoint
+NGINX
 else
-    htpasswd -c "$HTPASSWD_FILE" "$USERNAME"
+ cat >> "$cfg" <<NGINX
+$marker
+location ^~ $endpoint {
+    auth_basic "Restricted";
+    auth_basic_user_file $authfile;
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:$SOCKET;
+    }
+    try_files \$uri \$uri/ ${endpoint}index.php?\$query_string;
+}
+# SITE-MANAGER-PROTECT-END: $endpoint
+NGINX
 fi
-chown root:www-data "$HTPASSWD_FILE"
-chmod 640 "$HTPASSWD_FILE"
-
-# Insert the restriction before the closing brace of the first server block.
-# ^~ prevents the generic PHP regex from intercepting direct /path/file.php requests.
-# The nested PHP location inherits auth_basic from its parent.
-tmpfile="$(mktemp)"
-awk -v path="$PATH_TO_PROTECT" -v passwd="$HTPASSWD_FILE" '
-    BEGIN { depth=0; found=0; in_server=0; inserted=0 }
-    /^[[:space:]]*server[[:space:]]*\{/ && !found { in_server=1; found=1 }
-    in_server && /^[[:space:]]*}[[:space:]]*$/ && depth == 1 && !inserted {
-        print ""
-        print "    # SITE-MANAGER-PROTECT-BEGIN: " path
-        print "    location ^~ " path " {"
-        print "        auth_basic \"Restricted\";"
-        print "        auth_basic_user_file " passwd ";"
-        print ""
-        print "        location ~ \\.php$ {"
-        print "            include snippets/fastcgi-php.conf;"
-        print "            fastcgi_pass unix:/run/php/php8.4-fpm.sock;"
-        print "        }"
-        print ""
-        print "        try_files $uri $uri/ " path "index.php?$query_string;"
-        print "    }"
-        print "    # SITE-MANAGER-PROTECT-END: " path
-        print ""
-        inserted=1
-    }
-    in_server {
-        line=$0
-        opens=gsub(/\{/, "{", line)
-        closes=gsub(/\}/, "}", line)
-        depth+=opens-closes
-        if (depth==0) in_server=0
-    }
-    { print }
-    END { if (!inserted) exit 42 }
-' "$CONF" > "$tmpfile"
-cat "$tmpfile" > "$CONF"
-rm -f "$tmpfile"
-
-nginx -t
-systemctl reload nginx
-
-echo
-echo "Protection enabled."
-echo "Domain: $DOMAIN"
-echo "Path:   $PATH_TO_PROTECT"
-echo "File:   $HTPASSWD_FILE"
+if nginx -t && systemctl reload nginx; then rm -f "$cfg.backup"; echo 'Protection enabled'; else mv "$cfg.backup" "$cfg"; nginx -t || true; fail 'Nginx invalid; protection reverted'; fi

@@ -1,130 +1,48 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-DOMAIN="${1:-}"
-
-if [[ -z "$DOMAIN" ]]; then
-    echo "Usage: site-delete example.com"
-    exit 1
-fi
-
-CONF="/etc/nginx/sites-available/$DOMAIN.conf"
-LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
-WEB_ROOT="/srv/www/$DOMAIN"
-CRED_FILE="/root/site-credentials/$DOMAIN.txt"
-DB_BASE="${DOMAIN//./_}"
-DB_USER="$DB_BASE"
-
-if [[ ! -f "$CONF" ]]; then
-    echo "Error: site config not found: $CONF"
-    exit 1
-fi
-
-mapfile -t SITE_DATABASES < <(
-    mysql -NBe "SHOW DATABASES;" |
-    awk -v base="$DB_BASE" '
-        $0 == base || index($0, base "_") == 1 {
-            print
-        }
-    '
-)
-
-echo
-echo "Delete site: $DOMAIN"
-echo
-echo "This will remove:"
-echo "  - Nginx config"
-echo "  - Website files: $WEB_ROOT"
-echo "  - Credentials file: $CRED_FILE"
-echo "  - MariaDB primary user: $DB_USER"
-
-if [[ ${#SITE_DATABASES[@]} -gt 0 ]]; then
-    echo "  - MariaDB databases and matching suffix users:"
-    for db in "${SITE_DATABASES[@]}"; do
-        echo "      $db"
-    done
-else
-    echo "  - MariaDB databases: none found"
-fi
-
-echo
-echo "This will NOT remove:"
-echo "  - Local Let's Encrypt certificate"
-echo
-echo "[1] Delete site"
-echo "[2] Delete site and remove local certificate"
-echo "[0] Cancel"
-echo
-
-read -rp "Choose action: " action
-
-case "$action" in
-    1)
-        REMOVE_CERT="no"
-        ;;
-    2)
-        REMOVE_CERT="yes"
-        ;;
-    0)
-        echo "Cancelled."
-        exit 0
-        ;;
-    *)
-        echo "Invalid action."
-        exit 1
-        ;;
-esac
-
-echo
-read -rp "Type DELETE to continue: " confirm
-
-if [[ "$confirm" != "DELETE" ]]; then
-    echo "Aborted."
-    exit 0
-fi
-
-if [[ -L "$LINK" ]]; then
-    rm "$LINK"
-fi
-
-rm "$CONF"
-
-if [[ -d "$WEB_ROOT" ]]; then
-    rm -rf "$WEB_ROOT"
-fi
-
-for db in "${SITE_DATABASES[@]}"; do
-    mysql <<EOF
-DROP DATABASE IF EXISTS \`$db\`;
-DROP USER IF EXISTS '$db'@'localhost';
-EOF
-done
-
-mysql <<EOF
-DROP USER IF EXISTS '$DB_USER'@'localhost';
-FLUSH PRIVILEGES;
-EOF
-
-if [[ -f "$CRED_FILE" ]]; then
-    rm "$CRED_FILE"
-fi
-
-if [[ "$REMOVE_CERT" == "yes" ]]; then
-    if certbot certificates 2>/dev/null | grep -q "Certificate Name: $DOMAIN"; then
-        certbot delete --cert-name "$DOMAIN"
-    else
-        echo "No local certificate found for $DOMAIN."
-    fi
-fi
-
-nginx -t
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -ge 1 ]] || fail 'Usage: site-delete domain [--confirm] [--purge-data]'
+load_site "$1"; shift
+CONFIRM=0; PURGE=0
+for arg in "$@"; do case "$arg" in --confirm) CONFIRM=1;; --purge-data) PURGE=1;; *) fail "Unknown option $arg";; esac; done
+printf 'Site: %s\nUser: %s\nWeb: %s\nDatabase: %s\n' "$DOMAIN" "$SITE_USER" "$WEB_ROOT" "$DB_NAME"
+echo 'Registered additional databases:'
+[[ ! -f $(extra_registry) ]] || cut -f1 "$(extra_registry)"
+if (( ! CONFIRM )); then echo 'Dry run. Use --confirm to disable, or --confirm --purge-data to delete everything.'; exit 0; fi
+[[ "$WEB_ROOT" == "$WEB_BASE/$DOMAIN" && "$FPM_CONF" == "$FPM_DIR/$SITE_USER.conf" ]] || fail 'Path validation failed'
+[[ ! -L "$WEB_ROOT" && ! -L "$INC_DIR" ]] || fail 'Refusing symlink paths'
+if [[ -f "$FPM_CONF" ]]; then grep -Fxq "[$SITE_USER]" "$FPM_CONF" || fail 'Pool mismatch'; fi
+if [[ -f "$NGX_CONF" ]]; then grep -Fq "server_name $DOMAIN;" "$NGX_CONF" || fail 'Server name mismatch'; fi
+if [[ -L "$NGX_LINK" ]]; then [[ $(readlink "$NGX_LINK") == "$NGX_CONF" ]] || fail 'Link mismatch'; fi
+if [[ -L "$NGX_LINK" ]]; then mv "$NGX_LINK" "$NGX_LINK.disabled"; fi
+if ! nginx -t; then [[ ! -L "$NGX_LINK.disabled" ]] || mv "$NGX_LINK.disabled" "$NGX_LINK"; fail 'Nginx validation failed, restored link'; fi
 systemctl reload nginx
-
-echo
-echo "Site deleted: $DOMAIN"
-
-if [[ "$REMOVE_CERT" == "yes" ]]; then
-    echo "Local certificate removed if it existed."
-else
-    echo "Local certificate was left untouched."
+if (( ! PURGE )); then
+  [[ ! -L "$NGX_LINK.disabled" ]] || mv "$NGX_LINK.disabled" "$NGX_LINK"  # leave disable state as absent link below
+  rm -f -- "$NGX_LINK"
+  echo 'Disabled. Use --confirm --purge-data to permanently delete.'
+  exit 0
 fi
+# Drop enabled site before turning off the FPM pool.
+rm -f -- "$NGX_LINK.disabled"
+if [[ -f "$FPM_CONF" ]]; then mv "$FPM_CONF" "$FPM_CONF.disabled"; fi
+if ! "php-fpm$PHP_VERSION" -t; then [[ ! -f "$FPM_CONF.disabled" ]] || mv "$FPM_CONF.disabled" "$FPM_CONF"; fail 'PHP-FPM validation failed'; fi
+systemctl reload "php$PHP_VERSION-fpm"
+rm -f -- "$FPM_CONF.disabled"
+# Safe explicit database register: name\tuser\tseparate-account flag
+if [[ -f $(extra_registry) ]]; then
+ while IFS=$'\t' read -r database username separate; do
+  [[ "$database" =~ ^[a-z0-9_]{1,64}$ && "$username" =~ ^[a-z0-9_]{1,64}$ ]] || fail 'Invalid database registry'
+  mysql -e "DROP DATABASE IF EXISTS \`$database\`;"
+  if [[ $separate == yes ]]; then mysql -e "DROP USER IF EXISTS '$username'@'localhost';"; fi
+ done < "$(extra_registry)"
+fi
+mysql -e "DROP DATABASE IF EXISTS \`$DB_NAME\`; DROP USER IF EXISTS '$SITE_USER'@'localhost';"
+crontab -u "$SITE_USER" -r 2>/dev/null || true
+rm -f -- "$NGX_CONF" "$CRED_FILE" "$(extra_registry)" "$STATE"
+[[ ! -d "$INC_DIR" ]] || rm -rf -- "$INC_DIR"
+[[ ! -d "$WEB_ROOT" ]] || rm -rf -- "$WEB_ROOT"
+getent passwd "$SITE_USER" >/dev/null && userdel "$SITE_USER" || true
+getent group "$SITE_USER" >/dev/null && groupdel "$SITE_USER" || true
+echo 'Deleted site resources. Certbot certificate not removed.'

@@ -1,165 +1,137 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-DOMAIN="${1:-}"
-
-if [[ -z "$DOMAIN" ]]; then
-    echo "Usage: site-create example.com"
-    exit 1
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+SKIP_SSL=0
+if [[ $# -eq 2 && "$2" == '--no-ssl' ]]; then
+  SKIP_SSL=1
+elif [[ $# -ne 1 ]]; then
+  fail 'Usage: site-create domain.example [--no-ssl]'
 fi
-
-PHP_VERSION="8.4"
-
-WEB_ROOT="/srv/www/$DOMAIN"
-PUBLIC_ROOT="$WEB_ROOT/public"
-
-NGINX_CONF="/etc/nginx/sites-available/$DOMAIN.conf"
-NGINX_LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
-
-CREDENTIAL_DIR="/root/site-credentials"
-CREDENTIAL_FILE="$CREDENTIAL_DIR/$DOMAIN.txt"
-
-DB_NAME="${DOMAIN//./_}"
-DB_USER="$DB_NAME"
-DB_PASS="$(openssl rand -base64 24)"
-
-if [[ -e "$WEB_ROOT" ]]; then
-    echo "Error: web root already exists: $WEB_ROOT"
-    exit 1
-fi
-
-if [[ -e "$NGINX_CONF" ]]; then
-    echo "Error: Nginx config already exists: $NGINX_CONF"
-    exit 1
-fi
-
-mkdir -p "$PUBLIC_ROOT"
-mkdir -p "$CREDENTIAL_DIR"
-chmod 700 "$CREDENTIAL_DIR"
-
-cat > "$PUBLIC_ROOT/index.php" <<EOF
+validate_domain "$1"
+site_identity
+site_paths
+for cmd in useradd getent openssl sha256sum mysql nginx "php-fpm$PHP_VERSION" setfacl; do command -v "$cmd" >/dev/null || fail "Missing required command: $cmd"; done
+if (( ! SKIP_SSL )); then command -v certbot >/dev/null || fail "Missing required command: certbot"; fi
+[[ -d "$NGX_AVAIL" && -d "$NGX_ENABLED" && -d "$FPM_DIR" ]] || fail 'Nginx or PHP-FPM installation missing'
+for p in "$WEB_ROOT" "$NGX_CONF" "$NGX_LINK" "$INC_DIR" "$FPM_CONF" "$CRED_FILE" "$STATE" "$(extra_registry)"; do [[ ! -e "$p" && ! -L "$p" ]] || fail "Refusing to overwrite $p"; done
+! getent passwd "$SITE_USER" >/dev/null && ! getent group "$SITE_USER" >/dev/null || fail "Identity already exists: $SITE_USER"
+# Human-readable name whenever short enough; otherwise 55 + '_' + 8 hex.
+DB_NAME=${DOMAIN//./_}
+DB_NAME=${DB_NAME//-/_}
+if ((${#DB_NAME} > 64)); then DB_NAME="${DB_NAME:0:55}_$(printf %s "$DOMAIN" | sha256sum | cut -c1-8)"; fi
+[[ $DB_NAME =~ ^[a-z0-9_]+$ ]] || fail 'Invalid database name'
+# Validate name collision before making any changes.
+if [[ $(mysql -NBe "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '$DB_NAME'") != 0 ]]; then fail "Database already exists: $DB_NAME"; fi
+if [[ $(mysql -NBe "SELECT COUNT(*) FROM mysql.user WHERE User = '$SITE_USER' AND Host = 'localhost'") != 0 ]]; then fail "Database account already exists: $SITE_USER@localhost"; fi
+DB_PASS=$(openssl rand -hex 24)
+mkdir -p "$MGR" "$CREDENTIAL_DIR" "$INCLUDE_BASE"
+chmod 700 "$MGR" "$CREDENTIAL_DIR"
+# Record is written first so site-delete can recover a partially created site.
+cat > "$STATE" <<STATE
+record_version=2
+domain=$DOMAIN
+site_user=$SITE_USER
+database=$DB_NAME
+STATE
+chmod 600 "$STATE"
+: > "$(extra_registry)"
+chmod 600 "$(extra_registry)"
+trap 'result=$?; echo "Provisioning interrupted (status $result). Site may be partial; inspect with site-info and clean up with site-delete $DOMAIN." >&2' ERR
+useradd --system --user-group --home-dir "$WEB_ROOT" --shell /usr/sbin/nologin "$SITE_USER"
+mkdir -p "$PUBLIC_ROOT" "$RUNTIME_ROOT" "$INC_DIR"
+chown root:"$SITE_USER" "$WEB_ROOT" "$PUBLIC_ROOT"
+chmod 750 "$WEB_ROOT" "$PUBLIC_ROOT"
+chown "$SITE_USER:$SITE_USER" "$RUNTIME_ROOT"
+chmod 700 "$RUNTIME_ROOT"
+# Nginx may traverse and read public assets; only PHP site user reads private configs.
+setfacl -m u:www-data:--x "$WEB_ROOT"
+setfacl -m u:www-data:r-x "$PUBLIC_ROOT"
+cat > "$PUBLIC_ROOT/index.php" <<'PHP'
 <?php
-echo "Site $DOMAIN is working";
-EOF
-
-chown -R www-data:www-data "$WEB_ROOT"
-
-echo "Creating database..."
-
-mysql <<EOF
-CREATE DATABASE \`$DB_NAME\`
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-CREATE USER '$DB_USER'@'localhost'
-IDENTIFIED BY '$DB_PASS';
-
-GRANT ALL PRIVILEGES
-ON \`$DB_NAME\`.*
-TO '$DB_USER'@'localhost';
-
-FLUSH PRIVILEGES;
-EOF
-
-cat > "$CREDENTIAL_FILE" <<EOF
-Site credentials for $DOMAIN
-
-Created: $(date '+%Y-%m-%d %H:%M:%S')
-
-Domain:   $DOMAIN
-Web root: $PUBLIC_ROOT
-
-Database: $DB_NAME
-DB user:  $DB_USER
-DB pass:  $DB_PASS
-DB host:  localhost
-EOF
-
-chmod 600 "$CREDENTIAL_FILE"
-
-echo "Creating Nginx config..."
-
-cat > "$NGINX_CONF" <<EOF
+header('Content-Type: text/plain; charset=UTF-8');
+echo "PHP site is working\n";
+PHP
+chown root:"$SITE_USER" "$PUBLIC_ROOT/index.php"
+chmod 640 "$PUBLIC_ROOT/index.php"
+cat > "$FPM_CONF" <<FPM
+[$SITE_USER]
+user = $SITE_USER
+group = $SITE_USER
+listen = $SOCKET
+listen.owner = www-data
+listen.group = www-data
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 2
+pm.process_idle_timeout = 10s
+pm.max_requests = 500
+FPM
+chmod 644 "$FPM_CONF"
+# Order is intentional: explicit protection precedes generic PHP regex.
+cat > "$INC_DIR/protection.conf" <<'NGINX'
+# Optional exact-location Basic Auth rules. Managed by site-protect.
+NGINX
+cat > "$INC_DIR/routes.conf" <<'NGINX'
+location / {
+    try_files $uri $uri/ /index.php?$query_string;
+}
+NGINX
+cat > "$INC_DIR/php.conf" <<NGINX
+location ~ \.php\$ {
+    include snippets/fastcgi-php.conf;
+    fastcgi_pass unix:$SOCKET;
+}
+NGINX
+chmod 755 "$INC_DIR"; chmod 644 "$INC_DIR"/*.conf
+cat > "$NGX_CONF" <<NGINX
 server {
     listen 80;
     server_name $DOMAIN;
-
     root $PUBLIC_ROOT;
     index index.php index.html;
-
     access_log /var/log/nginx/$DOMAIN.access.log;
-    error_log  /var/log/nginx/$DOMAIN.error.log;
+    error_log /var/log/nginx/$DOMAIN.error.log;
 
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
+    location ~ /\\.(?!well-known/acme-challenge/) { deny all; }
 
-    location ~ \.php$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/run/php/php$PHP_VERSION-fpm.sock;
-    }
-
-    location ~ /\. {
-        deny all;
-    }
+    include $INC_DIR/protection.conf;
+    include $INC_DIR/routes.conf;
+    include $INC_DIR/php.conf;
 }
-EOF
-
-ln -s "$NGINX_CONF" "$NGINX_LINK"
-
+NGINX
+chmod 644 "$NGX_CONF"
+mysql <<SQL
+CREATE DATABASE \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER '$SITE_USER'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON \`$DB_NAME\`.* TO '$SITE_USER'@'localhost';
+SQL
+cat > "$CRED_FILE" <<CRED
+Domain: $DOMAIN
+Linux user/group: $SITE_USER
+PHP-FPM pool: $SITE_USER
+Web root: $WEB_ROOT
+Public root: $PUBLIC_ROOT
+Writable runtime: $RUNTIME_ROOT
+Database: $DB_NAME
+Database user: $SITE_USER
+Database host: localhost
+Database password: $DB_PASS
+CRED
+chmod 600 "$CRED_FILE"
+"php-fpm$PHP_VERSION" -t
+systemctl reload "php$PHP_VERSION-fpm"
+ln -s "$NGX_CONF" "$NGX_LINK"
 nginx -t
 systemctl reload nginx
-
-echo "Requesting Let's Encrypt certificate..."
-certbot --nginx -d "$DOMAIN"
-
-echo
-echo "Site created."
-echo "Domain:   $DOMAIN"
-echo "Web root: $PUBLIC_ROOT"
-echo "Database: $DB_NAME"
-echo
-echo "Credentials saved to:"
-echo "$CREDENTIAL_FILE"
-SERVER_IPV6="$(
-    ip -6 route get 2606:4700:4700::1111 2>/dev/null |
-    awk '
-        {
-            for (i = 1; i <= NF; i++) {
-                if ($i == "src") {
-                    print $(i + 1)
-                    exit
-                }
-            }
-        }
-    '
-)"
-SERVER_IPV4="$(
-    ip -4 route get 1.1.1.1 2>/dev/null |
-    awk '
-        {
-            for (i = 1; i <= NF; i++) {
-                if ($i == "src") {
-                    print $(i + 1)
-                    exit
-                }
-            }
-        }
-    '
-)"
-echo
-echo "Required DNS records:"
-echo
-
-if [[ -n "$SERVER_IPV4" ]]; then
-    printf "%-35s %-6s %s\n" "$DOMAIN." "A" "$SERVER_IPV4"
+printf 'HTTP site provisioned: %s (%s)\n' "$DOMAIN" "$SITE_USER"
+if (( SKIP_SSL )); then
+  echo 'SSL skipped by request. HTTP-only site is provisioned.'
+  printf 'To enable HTTPS later: sudo site-ssl %s\n' "$DOMAIN"
+elif certbot --nginx -d "$DOMAIN"; then
+  echo 'HTTPS certificate successfully configured.'
+else
+  echo 'WARNING: Certificate step failed; site remains provisioned. Retry with: site-ssl '"$DOMAIN" >&2
+  exit 2
 fi
-
-if [[ -n "$SERVER_IPV6" ]]; then
-    printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "$SERVER_IPV6"
-fi
-
-if [[ -z "$SERVER_IPV4" && -z "$SERVER_IPV6" ]]; then
-    printf "%-35s %-6s %s\n" "$DOMAIN." "A" "SERVER_IPV4"
-    printf "%-35s %-6s %s\n" "$DOMAIN." "AAAA" "SERVER_IPV6"
-fi
+printf 'Credentials: %s\n' "$CRED_FILE"

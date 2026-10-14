@@ -1,91 +1,43 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-REPO_RAW="https://raw.githubusercontent.com/bildoto/simple_lemp_cli/main"
-SCRIPT_RAW="$REPO_RAW/scripts"
-ASSET_RAW="$REPO_RAW/assets"
-
-TARGET_DIR="/usr/local/sbin"
-ASSET_DIR="/opt/simple-lemp-cli"
-
-SCRIPTS=(
-  site
-  site-create
-  site-enable
-  site-disable
-  site-delete
-  site-credentials
-  site-database-create
-  site-database-delete
-  site-dns
-  site-protect
-  site-unprotect
-  site-protect-user-add
-  site-protect-user-remove
-  site-status
-  site-check
-)
-
-if [[ "$EUID" -ne 0 ]]; then
-    echo "Run as root."
-    exit 1
+set -Eeuo pipefail
+[[ $EUID -eq 0 ]] || { echo 'Run installer as root' >&2; exit 1; }
+# Install directly from GitHub when this script was downloaded on its own.
+# An extracted checkout can still be installed locally with --local.
+BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [[ "${1:-}" != "--local" && ! -f "$BASE/lib/site-common" ]]; then
+    REPO="${SITE_MANAGER_REPO:-bildoto/simple_lemp_cli}"
+    REF="${SITE_MANAGER_REF:-main}"
+    # Keep the repository/ref explicit and reject surprising characters.
+    [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'Invalid repository' >&2; exit 1; }
+    [[ "$REF" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo 'Invalid Git ref' >&2; exit 1; }
+    command -v curl >/dev/null || { echo 'curl is required to download the repository' >&2; exit 1; }
+    command -v tar >/dev/null || { echo 'tar is required to unpack the repository' >&2; exit 1; }
+    TMPDIR_INSTALL="$(mktemp -d)"
+    trap 'rm -rf "$TMPDIR_INSTALL"' EXIT
+    URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
+    echo "Downloading $REPO ($REF) from GitHub..."
+    curl -fLSs --retry 2 "$URL" -o "$TMPDIR_INSTALL/source.tar.gz"
+    tar -xzf "$TMPDIR_INSTALL/source.tar.gz" -C "$TMPDIR_INSTALL"
+    # A GitHub branch archive should contain exactly one repository root.
+    mapfile -t INSTALLERS < <(find "$TMPDIR_INSTALL" -mindepth 2 -maxdepth 2 -name install.sh -type f)
+    [[ "${#INSTALLERS[@]}" -eq 1 ]] || { echo 'Archive does not contain exactly one installer' >&2; exit 1; }
+    INSTALL_ROOT="$(dirname "${INSTALLERS[0]}")"
+    [[ -f "$INSTALL_ROOT/lib/site-common" && -d "$INSTALL_ROOT/scripts" ]] || { echo 'Missing expected project files' >&2; exit 1; }
+    bash "$INSTALL_ROOT/install.sh" --local
+    exit $?
 fi
-
-echo "Installing required packages..."
-
-apt update
-
-apt install -y \
-  nginx \
-  mariadb-server \
-  php-fpm \
-  php-mysql \
-  certbot \
-  python3-certbot-nginx \
-  apache2-utils \
-  wget \
-  openssl
-
-echo
-echo "Installing site tools..."
-
-for script in "${SCRIPTS[@]}"; do
-    echo "Installing $script..."
-
-    tmpfile="$(mktemp)"
-
-    wget -qO "$tmpfile" "$SCRIPT_RAW/$script"
-
-    sed 's/\r$//' "$tmpfile" > "$TARGET_DIR/$script"
-    rm "$tmpfile"
-
-    chmod 755 "$TARGET_DIR/$script"
-    bash -n "$TARGET_DIR/$script"
+[[ -f "$BASE/lib/site-common" && -d "$BASE/scripts" ]] || { echo 'Cannot find local project files' >&2; exit 1; }
+apt-get update
+apt-get install -y nginx mariadb-server php8.4-fpm php8.4-mysql certbot python3-certbot-nginx apache2-utils acl cron openssl
+install -d -m 755 /usr/local/sbin /usr/local/lib/site-manager
+install -m 644 "$BASE/lib/site-common" /usr/local/lib/site-manager/site-common
+for script in "$BASE"/scripts/*; do
+ [[ -f $script ]] || continue
+ bash -n "$script"
+ install -m 755 "$script" "/usr/local/sbin/$(basename "$script")"
 done
-
-echo
-echo "Installing reusable assets..."
-
-mkdir -p "$ASSET_DIR/status"
-
-if wget -qO "$ASSET_DIR/status/index.php" "$ASSET_RAW/status/index.php"; then
-    chmod 644 "$ASSET_DIR/status/index.php"
-else
-    echo "Warning: could not install status page asset."
-fi
-
-mkdir -p /srv/www
-mkdir -p /root/site-credentials
-chmod 700 /root/site-credentials
-
-echo
-echo "Running site-check..."
-echo
-
-site-check
-
-echo
-echo "Installed."
-echo
-echo "Run:"
-echo "  site"
+install -d -m 700 /root/site-credentials /etc/site-manager/sites
+install -d -m 755 /etc/nginx/site-manager /srv/www
+install -d -m 755 /opt/simple-lemp-cli/status
+install -m 644 "$BASE/assets/status/index.php" /opt/simple-lemp-cli/status/index.php
+printf 'Installed local Site Manager v3. Run: sudo site\n'

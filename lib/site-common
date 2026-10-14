@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+PHP_VERSION=8.4
+WEB_BASE=/srv/www
+MGR=/etc/site-manager/sites
+INCLUDE_BASE=/etc/nginx/site-manager
+NGX_AVAIL=/etc/nginx/sites-available
+NGX_ENABLED=/etc/nginx/sites-enabled
+CREDENTIAL_DIR=/root/site-credentials
+FPM_DIR=/etc/php/$PHP_VERSION/fpm/pool.d
+fail() { echo "ERROR: $*" >&2; exit 1; }
+require_root() { (( EUID == 0 )) || fail 'Run using sudo'; }
+validate_domain() {
+  DOMAIN=${1,,}; DOMAIN=${DOMAIN%.}
+  [[ ${#DOMAIN} -le 253 && $DOMAIN == *.* && $DOMAIN != *..* ]] || fail 'Invalid hostname'
+  [[ $DOMAIN =~ ^[a-z0-9.-]+$ ]] || fail 'Hostnames must contain ASCII letters, numbers, hyphens and dots'
+  local part; local -a labels
+  IFS=. read -ra labels <<< "$DOMAIN"
+  for part in "${labels[@]}"; do
+    [[ ${#part} -ge 1 && ${#part} -le 63 && $part =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]] || fail "Invalid DNS label: $part"
+  done
+  ((${#labels[@]} >= 2)) || fail 'Missing public suffix'
+}
+# Display abbreviation only. For nonstandard public suffixes, override via
+# SITE_BASE_DOMAIN=registered.example.tld (validated as suffix of DOMAIN).
+site_identity() {
+  local -a labels base_labels
+  local n base first registered abbreviated hash raw
+  IFS=. read -ra labels <<< "$DOMAIN"; n=${#labels[@]}
+  base=${SITE_BASE_DOMAIN:-}
+  if [[ -n $base ]]; then
+    base=${base,,}; base=${base%.}
+    [[ $DOMAIN == "$base" || $DOMAIN == *."$base" ]] || fail 'SITE_BASE_DOMAIN is not a suffix of hostname'
+  else
+    base="${labels[n-2]}.${labels[n-1]}"
+    # Common compound public suffixes; use SITE_BASE_DOMAIN for other cases.
+    if ((n >= 3)) && [[ ${labels[n-1]} == uk ]] && [[ " co org ac gov net sch me ltd plc " == *" ${labels[n-2]} "* ]]; then
+      base="${labels[n-3]}.${labels[n-2]}.${labels[n-1]}"
+    fi
+  fi
+  IFS=. read -ra base_labels <<< "$base"
+  registered=${base_labels[0]}
+  if [[ $DOMAIN == "$base" ]]; then
+    abbreviated=${registered:0:6}
+  else
+    first=${labels[0]}
+    abbreviated="${first:0:4}${registered:0:2}"
+  fi
+  abbreviated=${abbreviated//-/}
+  abbreviated=${abbreviated:0:6}
+  printf -v abbreviated '%-6s' "$abbreviated"
+  abbreviated=${abbreviated// /x}
+  hash=$(printf %s "$DOMAIN" | sha256sum | cut -c1-7)
+  SITE_USER="s_${abbreviated}_${hash}"
+  ((${#SITE_USER} == 16)) || fail 'Internal site identity error'
+}
+site_paths() {
+  WEB_ROOT="$WEB_BASE/$DOMAIN"; PUBLIC_ROOT="$WEB_ROOT/public"; RUNTIME_ROOT="$WEB_ROOT/var"
+  NGX_CONF="$NGX_AVAIL/$DOMAIN.conf"; NGX_LINK="$NGX_ENABLED/$DOMAIN.conf"
+  INC_DIR="$INCLUDE_BASE/$DOMAIN"; FPM_CONF="$FPM_DIR/$SITE_USER.conf"
+  SOCKET="/run/php/$SITE_USER.sock"
+  CRED_FILE="$CREDENTIAL_DIR/$DOMAIN.txt"; STATE="$MGR/$DOMAIN.conf"
+}
+# Records are data, never shell-evaluated.
+record_field() { sed -n "s/^$2=//p" "$1" | head -n 1; }
+load_site() {
+  validate_domain "$1"
+  STATE="$MGR/$DOMAIN.conf"; [[ -f "$STATE" && ! -L "$STATE" ]] || fail "No registered site: $DOMAIN"
+  SITE_USER=$(record_field "$STATE" site_user)
+  DB_NAME=$(record_field "$STATE" database)
+  [[ $SITE_USER =~ ^s_[a-z0-9]{6}_[a-f0-9]{7}$ ]] || fail 'Invalid identity in record'
+  [[ $DB_NAME =~ ^[a-z0-9_]+$ && ${#DB_NAME} -le 64 ]] || fail 'Invalid database name in record'
+  site_paths
+}
+# A single site-user has no interactive shell. Administrators use sudo -u.
+
+# Record all additional databases explicitly. Never discover ownership by prefix.
+extra_registry() { echo "$MGR/$DOMAIN.databases"; }
+registered_extra() { [[ -f $(extra_registry) ]] && awk -F'\t' -v db="$1" '$1==db{found=1}END{exit !found}' "$(extra_registry)"; }
+valid_suffix() { [[ $1 =~ ^[a-z0-9_]{1,32}$ ]]; }
+short_db_name() {
+  local raw="$1" hash
+  if ((${#raw}<=64)); then printf '%s' "$raw"; else
+    hash=$(printf %s "$raw" | sha256sum | cut -c1-8)
+    printf '%s_%s' "${raw:0:55}" "$hash"
+  fi
+}
+require_registered() { load_site "$1"; }

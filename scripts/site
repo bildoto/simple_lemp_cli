@@ -19,6 +19,8 @@ require_dirs() {
 }
 
 create_site_prompt() {
+    local mode="${1:-ssl}"
+    local domain
     read -rp "Domain: " domain
 
     if [[ -z "$domain" ]]; then
@@ -26,7 +28,11 @@ create_site_prompt() {
         return
     fi
 
-    site-create "$domain"
+    case "$mode" in
+        ssl) site-create "$domain" ;;
+        no-ssl) site-create "$domain" --no-ssl ;;
+        *) echo "Unknown SSL mode: $mode" >&2; return 1 ;;
+    esac
 }
 
 list_sites() {
@@ -42,15 +48,26 @@ list_sites() {
             echo
             echo "No sites found."
             echo
-            echo "[1] Create new site"
+            echo "[1] Create site (with SSL)"
+            echo "[2] Create site (without SSL)"
+            echo "[3] Check server prerequisites"
             echo "[0] Exit"
             echo
 
             read -rp "Choose action: " action
 
             case "$action" in
-                1)
-                    create_site_prompt
+                1|2)
+                    if [[ "$action" == 1 ]]; then
+                        create_site_prompt ssl
+                    else
+                        create_site_prompt no-ssl
+                    fi
+                    echo
+                    read -rp "Press Enter to continue..."
+                    ;;
+                3)
+                    site-check
                     echo
                     read -rp "Press Enter to continue..."
                     ;;
@@ -84,15 +101,27 @@ list_sites() {
         done
 
         echo
-        echo "[c] Create new site"
+        echo "[c] Create site (with SSL)"
+        echo "[n] Create site (without SSL)"
+        echo "[h] Check server prerequisites"
         echo "[q] Quit"
         echo
 
         read -rp "Select site number: " choice
 
         case "$choice" in
-            c|create)
-                create_site_prompt
+            c|create|n)
+                if [[ "$choice" == n ]]; then
+                    create_site_prompt no-ssl
+                else
+                    create_site_prompt ssl
+                fi
+                echo
+                read -rp "Press Enter to continue..."
+                continue
+                ;;
+            h|check)
+                site-check
                 echo
                 read -rp "Press Enter to continue..."
                 continue
@@ -141,6 +170,8 @@ site_menu() {
         echo "[9]  Add protection user"
         echo "[10] Remove protection user"
         echo "[11] Delete site"
+        echo "[12] Configure / retry Let's Encrypt SSL"
+        echo "[13] Site identity / information"
         echo "[0]  Back"
         echo
 
@@ -181,8 +212,43 @@ site_menu() {
                 site-protect-user-remove "$domain" "$protect_path"
                 ;;
             11)
-                site-delete "$domain"
-                return
+                echo
+                echo "Deletion options for $domain:"
+                echo "[1] Preview resources only"
+                echo "[2] Disable site (retain files and database)"
+                echo "[3] Permanently delete site, databases and files"
+                echo "[0] Cancel"
+                read -rp "Choose deletion mode: " deletion_mode
+                case "$deletion_mode" in
+                    1) site-delete "$domain" ;;
+                    2)
+                        read -rp "Type $domain to confirm disabling: " confirmation
+                        if [[ "$confirmation" == "$domain" ]]; then
+                            site-delete "$domain" --confirm
+                            return
+                        else
+                            echo "Cancelled."
+                        fi
+                        ;;
+                    3)
+                        echo "WARNING: this permanently deletes the site's files, databases and account."
+                        read -rp "Type DELETE $domain to confirm: " confirmation
+                        if [[ "$confirmation" == "DELETE $domain" ]]; then
+                            site-delete "$domain" --confirm --purge-data
+                            return
+                        else
+                            echo "Cancelled."
+                        fi
+                        ;;
+                    0) echo "Cancelled." ;;
+                    *) echo "Invalid selection." ;;
+                esac
+                ;;
+            12)
+                site-ssl "$domain"
+                ;;
+            13)
+                site-info "$domain"
                 ;;
             0|b|back)
                 return
@@ -199,7 +265,14 @@ site_menu() {
 
 case "${1:-}" in
     create)
-        site-create "${2:-}"
+        # Forward --no-ssl to site-create when used noninteractively.
+        site-create "${@:2}"
+        ;;
+    info)
+        site-info "${2:-}"
+        ;;
+    ssl)
+        site-ssl "${2:-}"
         ;;
     enable)
         site-enable "${2:-}"
@@ -232,7 +305,7 @@ case "${1:-}" in
         site-protect-user-add "${2:-}" "${3:-}" "${4:-}"
         ;;
     protect-user-remove)
-        site-protect-user-delete "${2:-}" "${3:-}" "${4:-}"
+        site-protect-user-remove "${2:-}" "${3:-}" "${4:-}"
         ;;
     ""|list)
         list_sites
@@ -241,6 +314,8 @@ case "${1:-}" in
         echo "Usage:"
         echo "  site"
         echo "  site create example.com"
+        echo "  site create example.com --no-ssl"
+        echo "  site ssl example.com"
         echo "  site enable example.com"
         echo "  site disable example.com"
         echo "  site delete example.com"

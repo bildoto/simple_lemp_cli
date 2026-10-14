@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -eq 1 ]] || fail 'Usage: site-ssl domain.example'
+load_site "$1"
+[[ -f $NGX_CONF ]] || fail 'Missing Nginx configuration'
+certbot --nginx -d "$DOMAIN"
+nginx -t && systemctl reload nginx

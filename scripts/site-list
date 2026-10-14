@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+printf '%-48s %-16s %s\n' DOMAIN IDENTITY DATABASE
+shopt -s nullglob
+for f in "$MGR"/*.conf; do
+ [[ -f $f && ! -L $f ]] || continue
+ printf '%-48s %-16s %s\n' "$(basename "$f" .conf)" "$(record_field "$f" site_user)" "$(record_field "$f" database)"
+done

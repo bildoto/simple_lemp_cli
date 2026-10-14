@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+source /usr/local/lib/site-manager/site-common
+require_root
 DOMAIN="${1:-}"
 PATH_TO_PROTECT="${2:-}"
 USERNAME="${3:-}"
+load_site "$DOMAIN"
+[[ "$PATH_TO_PROTECT" =~ ^/([A-Za-z0-9_-]+/)+$ || "$PATH_TO_PROTECT" =~ ^/[A-Za-z0-9_-]+\.php$ ]] || fail "Invalid protected path"
 
 if [[ -z "$DOMAIN" || -z "$PATH_TO_PROTECT" ]]; then
     echo "Usage: site-protect-user-delete example.com /status/ [username]"
@@ -15,11 +19,9 @@ if [[ "$PATH_TO_PROTECT" != /* ]]; then
     exit 1
 fi
 
-if [[ "$PATH_TO_PROTECT" != */ ]]; then
-    PATH_TO_PROTECT="$PATH_TO_PROTECT/"
-fi
 
-SAFE_PATH="$(echo "$PATH_TO_PROTECT" | sed 's#^/##; s#/$##; s#[^A-Za-z0-9_-]#_#g')"
+
+SAFE_PATH="${PATH_TO_PROTECT#/}"; SAFE_PATH="${SAFE_PATH//\//_}"; SAFE_PATH="${SAFE_PATH%.php}"; SAFE_PATH="${SAFE_PATH%_}"
 HTPASSWD_FILE="/etc/nginx/htpasswd/$DOMAIN-$SAFE_PATH.htpasswd"
 
 if [[ ! -f "$HTPASSWD_FILE" ]]; then
@@ -42,6 +44,8 @@ if [[ ${#USERS[@]} -le 1 ]]; then
     echo "Use site-unprotect if you want to remove protection entirely."
     exit 1
 fi
+
+if [[ -n "$USERNAME" && ! "$USERNAME" =~ ^[A-Za-z0-9_.-]+$ ]]; then fail "Invalid username"; fi
 
 if [[ -z "$USERNAME" ]]; then
     echo
@@ -78,7 +82,7 @@ if [[ -z "$USERNAME" ]]; then
     USERNAME="${USERS[$index]}"
 fi
 
-if ! grep -q "^$USERNAME:" "$HTPASSWD_FILE"; then
+if ! grep -Fq "${USERNAME}:" "$HTPASSWD_FILE"; then
     echo "Error: user not found:"
     echo "  $USERNAME"
     exit 1
