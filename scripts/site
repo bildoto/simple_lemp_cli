@@ -181,6 +181,58 @@ database_menu() {
     done
 }
 
+cron_menu() {
+    local domain="$1" action cron_user cron_output cron_status
+    # Read the site registry, not a generated guess or a typed username.
+    if [[ ! -r /etc/site-manager/sites/$domain.conf ]]; then
+        echo "Error: site record not found for $domain" >&2
+        return 1
+    fi
+    cron_user=$(sed -n 's/^site_user=//p' "/etc/site-manager/sites/$domain.conf" | head -n 1)
+    if [[ ! "$cron_user" =~ ^s_[a-z0-9]{6}_[a-f0-9]{7}$ ]] || ! getent passwd "$cron_user" >/dev/null; then
+        echo "Error: registered cron user is missing or invalid for $domain" >&2
+        return 1
+    fi
+    if ! command -v crontab >/dev/null 2>&1; then
+        echo "Error: crontab is not installed (install the Debian cron package)." >&2
+        return 1
+    fi
+    while true; do
+        echo
+        echo "Manage cron jobs — $domain"
+        echo "Linux user: $cron_user"
+        echo
+        echo "[1] Edit cron jobs"
+        echo "[2] List cron jobs"
+        echo "[0] Back"
+        read -rp "Choose action: " action || return 0
+        case "$action" in
+            1)
+                # The standard editor handles installation and validates cron syntax.
+                # An editor failure must not exit the whole site menu (set -e).
+                if ! crontab -u "$cron_user" -e; then
+                    echo "Cron editor exited unsuccessfully; check whether changes were saved."
+                fi
+                ;;
+            2)
+                cron_status=0
+                cron_output=$(crontab -u "$cron_user" -l 2>&1) || cron_status=$?
+                if ((cron_status == 0)); then
+                    printf '%s\n' "$cron_output"
+                elif [[ "$cron_output" == *"no crontab for"* ]]; then
+                    echo "No cron jobs configured."
+                else
+                    printf 'Unable to list cron jobs: %s\n' "$cron_output" >&2
+                fi
+                ;;
+            0|b|back) return 0 ;;
+            *) echo "Invalid selection." ;;
+        esac
+        echo
+        read -rp "Press Enter to continue..." || return 0
+    done
+}
+
 site_menu() {
     local domain="$1"
 
@@ -200,6 +252,7 @@ site_menu() {
         echo "[10] Delete site"
         echo "[11] Configure / retry Let's Encrypt SSL"
         echo "[12] Site identity / information"
+        echo "[13] Manage cron jobs"
         echo "[0]  Back"
         echo
 
@@ -264,6 +317,9 @@ site_menu() {
                 ;;
             12)
                 site-info "$domain"
+                ;;
+            13)
+                cron_menu "$domain"
                 ;;
             0|b|back)
                 return

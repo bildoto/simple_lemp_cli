@@ -62,3 +62,19 @@ Additional databases are recorded explicitly in `/etc/site-manager/sites/example
 This package has **not been fully validated on a running Debian/Nginx/PHP-FPM/MariaDB host**. Bash syntax checks are not runtime integration tests. Do not replace a production installation until test sites have been created and protected resources verified over HTTP. Pending issues include hardened automatic rollback after every possible failure, script reconciliation with existing deployed sites, and ensuring every application deployment sets correct ownership and private credential permissions.
 
 Cron tasks should run as each site's dedicated user. Avoid PHP-executable uploads, and keep each site's DB credentials inaccessible to other site users.
+
+### Cron jobs (interactive)
+
+Select a site in `sudo site`, then choose **[13] Manage cron jobs**.
+The submenu provides **Edit cron jobs** and **List cron jobs** for that site's
+dedicated Linux user. The account is resolved from the site's root-owned
+registration record; you never need to enter the generated username.
+
+The editor uses Debian's regular `crontab -u USER -e`. An empty crontab is
+reported as "No cron jobs configured." Invalid choices and editor failures
+return to the menu rather than exiting `site`. Use absolute paths in jobs,
+and store outputs in a directory the site user can write (such as `var/`).
+
+Cron jobs are **not** automatically added on site creation or removed by
+this menu. Site deletion remains responsible for cleaning up that site's
+crontab when deleting the Linux account.
