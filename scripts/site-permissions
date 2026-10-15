@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -eq 2 && "$2" == --apply ]] || fail 'Usage: site-permissions example.com --apply'
+load_site "$1"
+[[ -d "$WEB_ROOT" && ! -L "$WEB_ROOT" && -d "$PUBLIC_ROOT" && ! -L "$PUBLIC_ROOT" && -d "$RUNTIME_ROOT" && ! -L "$RUNTIME_ROOT" ]] || fail 'Expected site directories missing or symlinked'
+getent passwd "$SITE_USER" >/dev/null || fail "Missing site account: $SITE_USER"
+command -v setfacl >/dev/null || fail 'Install acl to clear legacy ACLs before conversion'
+# This action normalizes whole trees. Refuse symlinks instead of following them,
+# or silently leaving ambiguous file paths in place.
+if find -P "$WEB_ROOT" -xdev -type l -print -quit | grep -q .; then
+    fail 'Site contains symbolic links; inspect them before using the bulk permissions converter'
+fi
+printf 'WARNING: This will reset ownership and permissions under %s.\n' "$WEB_ROOT"
+echo 'It will remove ACLs, make public/ readable by other local users, and'
+echo 'remove special modes (including executable bits) from ordinary files.'
+echo 'Do NOT run this on applications with public writable upload directories'
+echo 'or other custom permission requirements until those paths are reviewed.'
+read -rp "Type FIX $DOMAIN to continue: " reply
+[[ "$reply" == "FIX $DOMAIN" ]] || { echo 'Cancelled.'; exit 0; }
+# Existing ACLs may carry over from the old provisioning model.
+setfacl -Rb -- "$WEB_ROOT"
+chown -R -- "$SITE_USER:$SITE_USER" "$WEB_ROOT"
+# Default: everything except public/ is private.
+find -P "$WEB_ROOT" -xdev -type d -exec chmod 700 {} +
+find -P "$WEB_ROOT" -xdev -type f -exec chmod 600 {} +
+chmod 711 "$WEB_ROOT"
+find -P "$PUBLIC_ROOT" -xdev -type d -exec chmod 755 {} +
+find -P "$PUBLIC_ROOT" -xdev -type f -exec chmod 644 {} +
+chmod 700 "$RUNTIME_ROOT"
+printf 'Applied standard Unix permissions to %s. Verify application behavior.\n' "$DOMAIN"

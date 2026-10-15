@@ -34,7 +34,7 @@ For an HTTP-only site, request SSL later from that site's **Configure / retry Le
 
 The site user/group, MariaDB primary user and PHP-FPM pool share a fixed 16-character name such as `s_tilmpa_ead4431`. The full database name is descriptive and shortened to <=64 characters where necessary. `.co.uk` has a limited special case. For other compound public suffixes, set `SITE_BASE_DOMAIN=example.co.xx` when creating the site; the generated identity is saved, not recalculated.
 
-The site is created under `/srv/www/example.com`, with an isolated PHP-FPM pool, root-owned source files, `var/` writable by its own site user and ACL access for Nginx to the public directory. Applications requiring writable uploads or cache directories must be configured separately. Don't recursively give the site user ownership of source code.
+The site is created under `/srv/www/example.com` with a dedicated PHP-FPM pool and **site-user-owned files, using ordinary Unix permissions and no ACLs**. `public/` is readable to Nginx and other local site users; private credentials must live outside `public/` as `600` files. `var/` remains private at `700`. The website PHP process can now modify its own source files: this is a deliberate simplicity-versus-security trade-off. See [FILE-PERMISSIONS.md](FILE-PERMISSIONS.md) for deployment instructions and the migration procedure for legacy ACL-based sites.
 
 Each site has three Nginx configuration includes under `/etc/nginx/site-manager/example.com/`: `protection.conf`, `routes.conf`, `php.conf` in that order. Certificates are managed by Certbot's Nginx installer. **Review application routing and equivalent Apache `.htaccess` restrictions before publishing**. Protected PHP endpoints use exact locations; protected directories use `^~` with a nested PHP handler. Test protected URLs and alternative application routes. Config editing is validated via `nginx -t`.
 
@@ -78,3 +78,11 @@ and store outputs in a directory the site user can write (such as `var/`).
 Cron jobs are **not** automatically added on site creation or removed by
 this menu. Site deletion remains responsible for cleaning up that site's
 crontab when deleting the Linux account.
+
+## File ownership and deployment (Unix permissions)
+
+New sites use the simpler **site-owned, non-ACL** ownership model. PHP-FPM and site cron jobs run as a dedicated account; Nginx can serve static assets under `public/`, and secrets belong outside `public/` in private files/directories. Application files are writable by their own PHP user; this trades source-code immutability for straightforward deployment.
+
+**Read [FILE-PERMISSIONS.md](FILE-PERMISSIONS.md) before deploying applications or converting an existing site.** It includes sample modes, deployment commands, credential placement, upload guidance, trade-offs and verification steps.
+
+The selected-site menu has an advanced **Reset site file permissions** action to convert legacy ACL-based sites. It requires explicit confirmation and must not be used blindly on sites with custom writable directories or symlinks. Routine deployments should instead run under the dedicated site user.

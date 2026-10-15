@@ -11,7 +11,7 @@ fi
 validate_domain "$1"
 site_identity
 site_paths
-for cmd in useradd getent openssl sha256sum mysql nginx "php-fpm$PHP_VERSION" setfacl; do command -v "$cmd" >/dev/null || fail "Missing required command: $cmd"; done
+for cmd in useradd getent openssl sha256sum mysql nginx "php-fpm$PHP_VERSION"; do command -v "$cmd" >/dev/null || fail "Missing required command: $cmd"; done
 if (( ! SKIP_SSL )); then command -v certbot >/dev/null || fail "Missing required command: certbot"; fi
 [[ -d "$NGX_AVAIL" && -d "$NGX_ENABLED" && -d "$FPM_DIR" ]] || fail 'Nginx or PHP-FPM installation missing'
 for p in "$WEB_ROOT" "$NGX_CONF" "$NGX_LINK" "$INC_DIR" "$FPM_CONF" "$CRED_FILE" "$STATE" "$(extra_registry)"; do [[ ! -e "$p" && ! -L "$p" ]] || fail "Refusing to overwrite $p"; done
@@ -40,20 +40,20 @@ chmod 600 "$(extra_registry)"
 trap 'result=$?; echo "Provisioning interrupted (status $result). Site may be partial; inspect with site-info and clean up with site-delete $DOMAIN." >&2' ERR
 useradd --system --user-group --home-dir "$WEB_ROOT" --shell /usr/sbin/nologin "$SITE_USER"
 mkdir -p "$PUBLIC_ROOT" "$RUNTIME_ROOT" "$INC_DIR"
-chown root:"$SITE_USER" "$WEB_ROOT" "$PUBLIC_ROOT"
-chmod 750 "$WEB_ROOT" "$PUBLIC_ROOT"
-chown "$SITE_USER:$SITE_USER" "$RUNTIME_ROOT"
+# Standard Unix permissions: no ACLs. Site user owns deployable files.
+# The site root is traversable, but not listable, by other accounts.
+# Only public/ is world-readable; var/ and other private paths are not.
+chown "$SITE_USER:$SITE_USER" "$WEB_ROOT" "$PUBLIC_ROOT" "$RUNTIME_ROOT"
+chmod 711 "$WEB_ROOT"
+chmod 755 "$PUBLIC_ROOT"
 chmod 700 "$RUNTIME_ROOT"
-# Nginx may traverse and read public assets; only PHP site user reads private configs.
-setfacl -m u:www-data:--x "$WEB_ROOT"
-setfacl -m u:www-data:r-x "$PUBLIC_ROOT"
 cat > "$PUBLIC_ROOT/index.php" <<'PHP'
 <?php
 header('Content-Type: text/plain; charset=UTF-8');
 echo "PHP site is working\n";
 PHP
-chown root:"$SITE_USER" "$PUBLIC_ROOT/index.php"
-chmod 640 "$PUBLIC_ROOT/index.php"
+chown "$SITE_USER:$SITE_USER" "$PUBLIC_ROOT/index.php"
+chmod 644 "$PUBLIC_ROOT/index.php"
 cat > "$FPM_CONF" <<FPM
 [$SITE_USER]
 user = $SITE_USER

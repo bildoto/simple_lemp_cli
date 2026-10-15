@@ -253,6 +253,7 @@ site_menu() {
         echo "[11] Configure / retry Let's Encrypt SSL"
         echo "[12] Site identity / information"
         echo "[13] Manage cron jobs"
+        echo "[14] Reset site file permissions (advanced)"
         echo "[0]  Back"
         echo
 
@@ -321,6 +322,11 @@ site_menu() {
             13)
                 cron_menu "$domain"
                 ;;
+            14)
+                if ! site-permissions "$domain" --apply; then
+                    echo "Permission reset failed or was refused. Review errors above."
+                fi
+                ;;
             0|b|back)
                 return
                 ;;
@@ -338,6 +344,9 @@ case "${1:-}" in
     create)
         # Forward --no-ssl to site-create when used noninteractively.
         site-create "${@:2}"
+        ;;
+    permissions)
+        site-permissions "${2:-}" "${3:---apply}"
         ;;
     info)
         site-info "${2:-}"
@@ -390,6 +399,7 @@ case "${1:-}" in
         echo "  site create example.com"
         echo "  site create example.com --no-ssl"
         echo "  site ssl example.com"
+        echo "  site permissions example.com --apply"
         echo "  site enable example.com"
         echo "  site disable example.com"
         echo "  site delete example.com"
