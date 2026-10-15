@@ -86,3 +86,9 @@ New sites use the simpler **site-owned, non-ACL** ownership model. PHP-FPM and s
 **Read [FILE-PERMISSIONS.md](FILE-PERMISSIONS.md) before deploying applications or converting an existing site.** It includes sample modes, deployment commands, credential placement, upload guidance, trade-offs and verification steps.
 
 The selected-site menu has an advanced **Reset site file permissions** action to convert legacy ACL-based sites. It requires explicit confirmation and must not be used blindly on sites with custom writable directories or symlinks. Routine deployments should instead run under the dedicated site user.
+
+### Rotate database account password
+
+From `sudo site`, select the site, then **Manage databases → Rotate database password**. Choose the MariaDB account (not just a database). A shared account may access several databases: all applications using it must be updated. The command generates a fresh random password, stages and validates the new root-only credential record, changes the MariaDB password, then atomically replaces the saved record. The password is not printed during rotation; use **Show credentials** to retrieve it. It never edits application configurations automatically.
+
+In case of an unexpected filesystem failure after the database accepts the new password, the command preserves the staged credential file and warns rather than reporting success. Existing database data and privileges are unaffected.

@@ -167,12 +167,14 @@ database_menu() {
         echo "[1] Create additional database"
         echo "[2] Delete additional database"
         echo "[3] Change database privilege level (RESTRICTED ↔ ELEVATED)"
+        echo "[4] Rotate database password"
         echo "[0] Back"
         read -rp "Choose action: " action
         case "$action" in
             1) site-database-create "$domain" ;;
             2) site-database-delete "$domain" ;;
             3) site-database-privileges "$domain" toggle ;;
+            4) site-database-rotate "$domain" ;;
             0|b|back) return ;;
             *) echo "Invalid action." ;;
         esac
@@ -366,6 +368,9 @@ case "${1:-}" in
     credentials)
         site-credentials "${2:-}"
         ;;
+    database-rotate|db-rotate)
+        site-database-rotate "${2:-}"
+        ;;
     database-privileges|db-privileges)
         site-database-privileges "${2:-}" "${3:-list}" "${4:-}"
         ;;
@@ -405,6 +410,7 @@ case "${1:-}" in
         echo "  site delete example.com"
         echo "  site credentials example.com"
         echo "  site database-privileges example.com list|elevate|restrict [database]"
+        echo "  site database-rotate example.com"
         echo "  site database-create example.com logs"
         echo "  site database-delete example.com logs"
 		echo "  site dns example.com"

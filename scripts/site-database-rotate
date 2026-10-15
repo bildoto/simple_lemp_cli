@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -eq 1 ]] || fail 'Usage: site-database-rotate DOMAIN'
+load_site "$1"
+registry=$(extra_registry)
+entries=("$DB_NAME"$'\t'"$SITE_USER")
+if [[ -f $registry ]]; then
+    while IFS=$'\t' read -r db user separate; do
+        [[ -n $db ]] || continue
+        [[ $db =~ ^[a-z0-9_]{1,64}$ && $user =~ ^[a-z0-9_]{1,64}$ ]] || fail 'Invalid database registry'
+        entries+=("$db"$'\t'"$user")
+    done < "$registry"
+fi
+# Distinct database accounts, retaining the list of databases each serves.
+declare -a users=()
+declare -A account_dbs=()
+for entry in "${entries[@]}"; do
+    IFS=$'\t' read -r db user <<< "$entry"
+    if [[ ! -v account_dbs[$user] ]]; then
+        users+=("$user")
+        account_dbs[$user]="$db"
+    else
+        account_dbs[$user]+=", $db"
+    fi
+done
+printf '\nDatabase accounts for %s:\n' "$DOMAIN"
+for i in "${!users[@]}"; do
+    user=${users[i]}
+    printf '[%d] %-30s Databases: %s\n' "$((i+1))" "$user" "${account_dbs[$user]}"
+done
+read -rp 'Choose account (0=cancel): ' selection || exit 0
+[[ $selection =~ ^[0-9]+$ ]] || { echo 'Invalid selection. Rotation cancelled.'; exit 0; }
+num=$((10#$selection))
+(( num != 0 )) || exit 0
+if (( num > ${#users[@]} )); then echo 'Invalid selection. Rotation cancelled.'; exit 0; fi
+user=${users[num-1]}
+[[ -f $CRED_FILE && ! -L $CRED_FILE ]] || fail 'Credential record missing or symlinked; refusing rotation'
+[[ $(stat -c %a "$CRED_FILE") == 600 ]] || fail 'Credential file must have mode 600'
+mysql --batch --skip-column-names -e "SHOW GRANTS FOR '$user'@'localhost';" >/dev/null || fail 'Database account not found'
+printf '\nAccount: %s@localhost\nAffects: %s\n' "$user" "${account_dbs[$user]}"
+echo 'You must update every application configuration that uses this account.'
+read -rp 'Type ROTATE to change this account password: ' confirm || exit 0
+[[ $confirm == ROTATE ]] || { echo 'Cancelled.'; exit 0; }
+# Build and validate the new credentials record *before* changing MariaDB.
+new_password=$(openssl rand -hex 24) || fail 'Could not generate password'
+tmp=$(mktemp "${CRED_FILE}.rotate.XXXXXXXX") || fail 'Unable to stage credential update'
+chmod 600 "$tmp"
+trap 'rm -f -- "$tmp"' EXIT
+# Credentials must not be placed in command-line arguments or shell history.
+# Only the exact account section is updated; all other records are retained.
+if ! NEW_DB_PASSWORD="$new_password" python3 - "$CRED_FILE" "$DB_NAME" "$SITE_USER" "$user" "$registry" "$tmp" <<'PY'
+import os, sys, pathlib, re
+source, primary_db, primary_user, target_user, registry, output = sys.argv[1:]
+text = pathlib.Path(source).read_text()
+password = os.environ['NEW_DB_PASSWORD']
+lines = text.splitlines(keepends=True)
+if target_user == primary_user:
+    # Match the primary record only (outside additional database sections).
+    inside = False
+    matches = []
+    for i, line in enumerate(lines):
+        if line.startswith('### DATABASE-BEGIN: '): inside = True
+        if not inside and line.startswith('Database password: '): matches.append(i)
+        if line.startswith('### DATABASE-END: '): inside = False
+    if len(matches) != 1: raise SystemExit('Cannot identify the primary credential password unambiguously')
+    i = matches[0]
+    lines[i] = 'Database password: ' + password + ('\n' if lines[i].endswith('\n') else '')
+else:
+    # Every additional database using this account has its own credential section
+    # only when it is a separately created DB user. Match by DB user, not guesswork.
+    matches = []
+    in_block = False
+    block_db = None
+    block_user = None
+    pass_line = None
+    for i, line in enumerate(lines):
+        if line.startswith('### DATABASE-BEGIN: '):
+            if in_block: raise SystemExit('Nested credential sections')
+            in_block = True; block_db = line.split(': ',1)[1].strip(); block_user = None; pass_line = None
+        elif line.startswith('### DATABASE-END: '):
+            if not in_block or line.split(': ',1)[1].strip() != block_db:
+                raise SystemExit('Malformed credential section')
+            if block_user == target_user:
+                if pass_line is None: raise SystemExit('Missing password in matching section')
+                matches.append(pass_line)
+            in_block = False
+        elif in_block and line.startswith('DB user: '): block_user = line.split(': ',1)[1].strip()
+        elif in_block and line.startswith('DB pass: '): pass_line = i
+    if in_block or not matches: raise SystemExit('No matching additional-account credential section')
+    for i in matches:
+        lines[i] = 'DB pass: ' + password + ('\n' if lines[i].endswith('\n') else '')
+with open(output, 'w') as f:
+    f.writelines(lines)
+PY
+then
+    fail 'Credential record format not recognized; MariaDB password was NOT changed'
+fi
+# New password is hexadecimal (safe in a quoted SQL literal).
+if ! mysql <<SQL
+ALTER USER '$user'@'localhost' IDENTIFIED BY '$new_password';
+SQL
+then
+    fail 'MariaDB rejected password change; credentials record remains unchanged'
+fi
+if ! mv -f -- "$tmp" "$CRED_FILE"; then
+    echo 'CRITICAL: MariaDB password changed but credential file could not be updated.' >&2
+    echo "Staged credential record: $tmp" >&2
+    echo 'Preserve that staged file and repair the credential record immediately.' >&2
+    trap - EXIT
+    exit 1
+fi
+chmod 600 "$CRED_FILE"
+trap - EXIT
+unset new_password
+echo 'MariaDB password rotated and Site Manager credentials updated.'
+echo 'Use Show credentials to retrieve the new password, then update each affected application configuration.'
+echo 'No database data, user grants, or application configuration files were modified.'
