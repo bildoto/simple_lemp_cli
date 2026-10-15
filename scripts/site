@@ -239,22 +239,12 @@ site_menu() {
                 echo
                 echo "Deletion options for $domain:"
                 echo "[1] Preview resources only"
-                echo "[2] Disable site (retain files and database)"
-                echo "[3] Permanently delete site, databases and files"
+                echo "[2] Permanently delete site, databases and files"
                 echo "[0] Cancel"
                 read -rp "Choose deletion mode: " deletion_mode
                 case "$deletion_mode" in
                     1) site-delete "$domain" ;;
                     2)
-                        read -rp "Type $domain to confirm disabling: " confirmation
-                        if [[ "$confirmation" == "$domain" ]]; then
-                            site-delete "$domain" --confirm
-                            return
-                        else
-                            echo "Cancelled."
-                        fi
-                        ;;
-                    3)
                         echo "WARNING: this permanently deletes the site's files, databases and account."
                         read -rp "Type DELETE $domain to confirm: " confirmation
                         if [[ "$confirmation" == "DELETE $domain" ]]; then

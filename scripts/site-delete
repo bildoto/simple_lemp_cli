@@ -6,10 +6,11 @@ require_root
 load_site "$1"; shift
 CONFIRM=0; PURGE=0
 for arg in "$@"; do case "$arg" in --confirm) CONFIRM=1;; --purge-data) PURGE=1;; *) fail "Unknown option $arg";; esac; done
+if (( CONFIRM && ! PURGE )); then fail 'Deletion requires --purge-data; use site-disable to disable a site.'; fi
 printf 'Site: %s\nUser: %s\nWeb: %s\nDatabase: %s\n' "$DOMAIN" "$SITE_USER" "$WEB_ROOT" "$DB_NAME"
 echo 'Registered additional databases:'
 [[ ! -f $(extra_registry) ]] || cut -f1 "$(extra_registry)"
-if (( ! CONFIRM )); then echo 'Dry run. Use --confirm to disable, or --confirm --purge-data to delete everything.'; exit 0; fi
+if (( ! CONFIRM )); then echo 'Dry run. Use --confirm --purge-data to permanently delete site resources. To disable, use site-disable.'; exit 0; fi
 [[ "$WEB_ROOT" == "$WEB_BASE/$DOMAIN" && "$FPM_CONF" == "$FPM_DIR/$SITE_USER.conf" ]] || fail 'Path validation failed'
 [[ ! -L "$WEB_ROOT" && ! -L "$INC_DIR" ]] || fail 'Refusing symlink paths'
 if [[ -f "$FPM_CONF" ]]; then grep -Fxq "[$SITE_USER]" "$FPM_CONF" || fail 'Pool mismatch'; fi
@@ -19,10 +20,8 @@ if [[ -L "$NGX_LINK" ]]; then mv "$NGX_LINK" "$NGX_LINK.disabled"; fi
 if ! nginx -t; then [[ ! -L "$NGX_LINK.disabled" ]] || mv "$NGX_LINK.disabled" "$NGX_LINK"; fail 'Nginx validation failed, restored link'; fi
 systemctl reload nginx
 if (( ! PURGE )); then
-  [[ ! -L "$NGX_LINK.disabled" ]] || mv "$NGX_LINK.disabled" "$NGX_LINK"  # leave disable state as absent link below
-  rm -f -- "$NGX_LINK"
-  echo 'Disabled. Use --confirm --purge-data to permanently delete.'
-  exit 0
+  [[ ! -L "$NGX_LINK.disabled" ]] || mv "$NGX_LINK.disabled" "$NGX_LINK"
+  fail 'Deletion requires --purge-data. To disable the site, use site-disable.'
 fi
 # Drop enabled site before turning off the FPM pool.
 rm -f -- "$NGX_LINK.disabled"

@@ -20,7 +20,7 @@ The bootstrap expects the repository's **main** branch to contain the new v3 fil
 
 Run **`sudo site`** to administer the server. You do **not** need to invoke the individual `site-*` utilities in normal use; they are implementation helpers used by the menu. They remain installed and directly callable for scripting and troubleshooting.
 
-The initial site list provides separate entries for **Create site (with SSL)** and **Create site (without SSL)**; both invoke the same underlying provisioning script with different arguments. Select an existing site to manage enabling/disabling, credentials, databases, DNS, Basic Auth, SSL, identity information and deletion. **Delete site** offers preview, disable-only and permanent removal with explicit confirmation inside the menu. The menu also provides a server-prerequisite check.
+The initial site list provides separate entries for **Create site (with SSL)** and **Create site (without SSL)**; both invoke the same underlying provisioning script with different arguments. Select an existing site to manage enabling/disabling, credentials, databases, DNS, Basic Auth, SSL, identity information and deletion. **Enable** and **Disable** are separate site actions. **Delete site** offers preview and permanent removal with explicit confirmation; it never silently performs a disable-only action. The menu also provides a server-prerequisite check.
 
 If you deliberately want noninteractive automation, the equivalent commands remain supported:
 
@@ -53,7 +53,8 @@ Additional databases are recorded explicitly in `/etc/site-manager/sites/example
 ## Deletion
 
 - `sudo site-delete example.com` displays resources (dry run).
-- `sudo site-delete example.com --confirm` disables the site without deleting its data.
+- `sudo site-disable example.com` disables the Nginx site while preserving files, database and PHP-FPM pool. Use `sudo site-enable example.com` to re-enable it. Both commands validate and attempt to roll back if Nginx testing/reload fails.
+- `sudo site-delete example.com --confirm` is intentionally rejected; deletion requires `--purge-data`.
 - `sudo site-delete example.com --confirm --purge-data` permanently removes site resources and its registered additional databases (and cron). Certificate material is not removed automatically.
 
 ## Limitations and testing

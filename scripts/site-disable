@@ -2,7 +2,6 @@
 set -euo pipefail
 
 DOMAIN="${1:-}"
-
 if [[ -z "$DOMAIN" ]]; then
     echo "Usage: site-disable example.com"
     exit 1
@@ -12,18 +11,34 @@ CONF="/etc/nginx/sites-available/$DOMAIN.conf"
 LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
 
 if [[ ! -f "$CONF" ]]; then
-    echo "Error: site config not found: $CONF"
+    echo "Error: site config not found: $CONF" >&2
     exit 1
 fi
 
 if [[ ! -L "$LINK" ]]; then
+    if [[ -e "$LINK" ]]; then
+        echo "Error: expected a symlink at $LINK; refusing to modify it" >&2
+        exit 1
+    fi
     echo "Site is already disabled: $DOMAIN"
     exit 0
 fi
 
-rm "$LINK"
+if [[ "$(readlink "$LINK")" != "$CONF" ]]; then
+    echo "Error: unexpected symlink target for $LINK; refusing to modify it" >&2
+    exit 1
+fi
 
-nginx -t
-systemctl reload nginx
-
+# Nginx loads sites-enabled; removing the link disables only this virtual host.
+# Retain a rollback copy until both validation and reload succeed.
+BACKUP="${LINK}.disable-rollback.$$"
+mv -- "$LINK" "$BACKUP"
+if ! nginx -t || ! systemctl reload nginx; then
+    mv -- "$BACKUP" "$LINK"
+    echo "Error: disabling failed; previous Nginx configuration restored" >&2
+    nginx -t >&2 || true
+    systemctl reload nginx || true
+    exit 1
+fi
+rm -- "$BACKUP"
 echo "Site disabled: $DOMAIN"
