@@ -31,7 +31,8 @@ fi
 
 # Nginx loads sites-enabled; removing the link disables only this virtual host.
 # Retain a rollback copy until both validation and reload succeed.
-BACKUP="/etc/nginx/sites-available/.${DOMAIN}.disable-rollback.$$"mv -- "$LINK" "$BACKUP"
+BACKUP="/etc/nginx/sites-available/.${DOMAIN}.disable-rollback.$$"
+mv -- "$LINK" "$BACKUP"
 if ! nginx -t || ! systemctl reload nginx; then
     mv -- "$BACKUP" "$LINK"
     echo "Error: disabling failed; previous Nginx configuration restored" >&2
