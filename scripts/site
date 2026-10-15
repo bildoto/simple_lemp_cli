@@ -40,7 +40,7 @@ list_sites() {
 
     while true; do
         mapfile -t sites < <(
-            find "$AVAILABLE_DIR" -maxdepth 1 -type f -name "*.conf" \
+            find "$AVAILABLE_DIR" -maxdepth 1 -type f -name "*.conf" ! -name "*.disabled.conf" \
                 -printf "%f\n" | sed 's/\.conf$//' | sort
         )
 
@@ -91,7 +91,8 @@ list_sites() {
         for i in "${!sites[@]}"; do
             domain="${sites[$i]}"
 
-            if [[ -L "$ENABLED_DIR/$domain.conf" ]]; then
+            if [[ -L "$ENABLED_DIR/$domain.conf" ]] &&
+               [[ $(readlink "$ENABLED_DIR/$domain.conf") == "$AVAILABLE_DIR/$domain.conf" ]]; then
                 status="active"
             else
                 status="inactive"

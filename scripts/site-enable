@@ -1,40 +1,36 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-DOMAIN="${1:-}"
-if [[ -z "$DOMAIN" ]]; then
-    echo "Usage: site-enable example.com"
-    exit 1
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -eq 1 ]] || fail 'Usage: site-enable example.com'
+load_site "$1"
+CONF="$NGX_CONF"; LINK="$NGX_LINK"
+DISABLED_CONF="$NGX_AVAIL/$DOMAIN.disabled.conf"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail 'Missing or unsafe site configuration'
+if [[ -L "$LINK" && $(readlink "$LINK") == "$CONF" ]]; then
+  echo "Site already enabled: $DOMAIN"; exit 0
 fi
-
-CONF="/etc/nginx/sites-available/$DOMAIN.conf"
-LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
-
-if [[ ! -f "$CONF" ]]; then
-    echo "Error: site config not found: $CONF" >&2
-    exit 1
-fi
-
 if [[ -L "$LINK" ]]; then
-    if [[ "$(readlink "$LINK")" != "$CONF" ]]; then
-        echo "Error: unexpected symlink target for $LINK; refusing to modify it" >&2
-        exit 1
-    fi
-    echo "Site is already enabled: $DOMAIN"
-    exit 0
+  [[ $(readlink "$LINK") == "$DISABLED_CONF" && -f "$DISABLED_CONF" ]] || fail 'Unexpected site symlink; refusing to modify'
+elif [[ -e "$LINK" ]]; then
+  fail 'Site link is not a symlink'
 fi
-if [[ -e "$LINK" ]]; then
-    echo "Error: $LINK already exists and is not a symlink" >&2
-    exit 1
-fi
-
-ln -s -- "$CONF" "$LINK"
+PREVIOUS=""
+[[ -L "$LINK" ]] && PREVIOUS=$(readlink "$LINK")
+NEXT_LINK=$(mktemp -u "$NGX_ENABLED/.${DOMAIN}.XXXXXXXX")
+ln -s -- "$CONF" "$NEXT_LINK"
+mv -Tf -- "$NEXT_LINK" "$LINK"
 if ! nginx -t || ! systemctl reload nginx; then
-    rm -- "$LINK"
-    echo "Error: enabling failed; previous Nginx configuration restored" >&2
-    nginx -t >&2 || true
-    systemctl reload nginx || true
-    exit 1
+  if [[ -n "$PREVIOUS" ]]; then
+    NEXT_LINK=$(mktemp -u "$NGX_ENABLED/.${DOMAIN}.XXXXXXXX")
+    ln -s -- "$PREVIOUS" "$NEXT_LINK"
+    mv -Tf -- "$NEXT_LINK" "$LINK"
+  else
+    rm -f -- "$LINK"
+  fi
+  nginx -t >&2 || true
+  systemctl reload nginx || true
+  fail 'Enabling failed; previous state restored'
 fi
-
+[[ -z "$PREVIOUS" ]] || rm -f -- "$DISABLED_CONF"
 echo "Site enabled: $DOMAIN"

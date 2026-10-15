@@ -53,7 +53,7 @@ Additional databases are recorded explicitly in `/etc/site-manager/sites/example
 ## Deletion
 
 - `sudo site-delete example.com` displays resources (dry run).
-- `sudo site-disable example.com` disables the Nginx site while preserving files, database and PHP-FPM pool. Use `sudo site-enable example.com` to re-enable it. Both commands validate and attempt to roll back if Nginx testing/reload fails.
+- `sudo site-disable example.com` activates a 503 maintenance virtual host while preserving files, database and PHP-FPM pool. HTTPS uses the existing Let's Encrypt certificate, if present. Certificate renewal for disabled sites must be verified with `certbot renew --dry-run`; the ACME challenge path is reserved but renewal plugin behavior varies. Use `sudo site-enable example.com` to re-enable it. Both commands validate and attempt to roll back if Nginx testing/reload fails.
 - `sudo site-delete example.com --confirm` is intentionally rejected; deletion requires `--purge-data`.
 - `sudo site-delete example.com --confirm --purge-data` permanently removes site resources and its registered additional databases (and cron). Certificate material is not removed automatically.
 

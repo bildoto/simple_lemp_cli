@@ -1,44 +1,47 @@
 #!/usr/bin/env bash
-set -euo pipefail
-
-DOMAIN="${1:-}"
-if [[ -z "$DOMAIN" ]]; then
-    echo "Usage: site-disable example.com"
-    exit 1
+set -Eeuo pipefail
+source /usr/local/lib/site-manager/site-common
+require_root
+[[ $# -eq 1 ]] || fail 'Usage: site-disable example.com'
+load_site "$1"
+CONF="$NGX_CONF"; LINK="$NGX_LINK"
+DISABLED_CONF="$NGX_AVAIL/$DOMAIN.disabled.conf"
+[[ -f "$CONF" && ! -L "$CONF" ]] || fail 'Missing or unsafe active site configuration'
+if [[ -L "$LINK" && $(readlink "$LINK") == "$DISABLED_CONF" ]]; then
+  echo "Site already disabled: $DOMAIN"; exit 0
 fi
-
-CONF="/etc/nginx/sites-available/$DOMAIN.conf"
-LINK="/etc/nginx/sites-enabled/$DOMAIN.conf"
-
-if [[ ! -f "$CONF" ]]; then
-    echo "Error: site config not found: $CONF" >&2
-    exit 1
-fi
-
-if [[ ! -L "$LINK" ]]; then
-    if [[ -e "$LINK" ]]; then
-        echo "Error: expected a symlink at $LINK; refusing to modify it" >&2
-        exit 1
-    fi
-    echo "Site is already disabled: $DOMAIN"
-    exit 0
-fi
-
-if [[ "$(readlink "$LINK")" != "$CONF" ]]; then
-    echo "Error: unexpected symlink target for $LINK; refusing to modify it" >&2
-    exit 1
-fi
-
-# Nginx loads sites-enabled; removing the link disables only this virtual host.
-# Retain a rollback copy until both validation and reload succeed.
-BACKUP="/etc/nginx/sites-available/.${DOMAIN}.disable-rollback.$$"
-mv -- "$LINK" "$BACKUP"
+[[ -L "$LINK" && $(readlink "$LINK") == "$CONF" ]] || fail 'Unexpected or missing enabled-site symlink'
+[[ ! -e "$DISABLED_CONF" && ! -L "$DISABLED_CONF" ]] || fail "Disabled configuration already exists: $DISABLED_CONF"
+# Only use existing, matching certificate files. Never fabricate TLS certificates.
+CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+TMP=$(mktemp "$NGX_AVAIL/.${DOMAIN}.disabled.XXXXXXXX")
+trap 'rm -f -- "$TMP"' EXIT
+{
+  printf 'server {\n    listen 80;\n    server_name %s;\n' "$DOMAIN"
+  printf '    location ^~ /.well-known/acme-challenge/ { root /var/lib/letsencrypt; try_files $uri =404; }\n'
+  printf '    location / { return 503; }\n}\n'
+  if [[ -s "$CERT" && -s "$KEY" ]]; then
+    printf 'server {\n    listen 443 ssl;\n    server_name %s;\n' "$DOMAIN"
+    printf '    ssl_certificate %s;\n    ssl_certificate_key %s;\n' "$CERT" "$KEY"
+    printf '    location / { return 503; }\n}\n'
+  else
+    echo 'Note: no site-specific certificate found; disabled state is HTTP-only.' >&2
+  fi
+} > "$TMP"
+chmod 644 "$TMP"
+mv -- "$TMP" "$DISABLED_CONF"
+# Change link atomically; rollback files are never stored in sites-enabled.
+NEXT_LINK=$(mktemp -u "$NGX_ENABLED/.${DOMAIN}.XXXXXXXX")
+ln -s -- "$DISABLED_CONF" "$NEXT_LINK"
+mv -Tf -- "$NEXT_LINK" "$LINK"
 if ! nginx -t || ! systemctl reload nginx; then
-    mv -- "$BACKUP" "$LINK"
-    echo "Error: disabling failed; previous Nginx configuration restored" >&2
-    nginx -t >&2 || true
-    systemctl reload nginx || true
-    exit 1
+  NEXT_LINK=$(mktemp -u "$NGX_ENABLED/.${DOMAIN}.XXXXXXXX")
+  ln -s -- "$CONF" "$NEXT_LINK"
+  mv -Tf -- "$NEXT_LINK" "$LINK"
+  rm -f -- "$DISABLED_CONF"
+  nginx -t >&2 || true
+  systemctl reload nginx || true
+  fail 'Disabling failed; original site restored'
 fi
-rm -- "$BACKUP"
-echo "Site disabled: $DOMAIN"
+echo "Site disabled: $DOMAIN (503 maintenance response)"

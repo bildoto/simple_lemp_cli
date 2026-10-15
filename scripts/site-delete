@@ -15,16 +15,22 @@ if (( ! CONFIRM )); then echo 'Dry run. Use --confirm --purge-data to permanentl
 [[ ! -L "$WEB_ROOT" && ! -L "$INC_DIR" ]] || fail 'Refusing symlink paths'
 if [[ -f "$FPM_CONF" ]]; then grep -Fxq "[$SITE_USER]" "$FPM_CONF" || fail 'Pool mismatch'; fi
 if [[ -f "$NGX_CONF" ]]; then grep -Fq "server_name $DOMAIN;" "$NGX_CONF" || fail 'Server name mismatch'; fi
-if [[ -L "$NGX_LINK" ]]; then [[ $(readlink "$NGX_LINK") == "$NGX_CONF" ]] || fail 'Link mismatch'; fi
-if [[ -L "$NGX_LINK" ]]; then mv "$NGX_LINK" "$NGX_LINK.disabled"; fi
-if ! nginx -t; then [[ ! -L "$NGX_LINK.disabled" ]] || mv "$NGX_LINK.disabled" "$NGX_LINK"; fail 'Nginx validation failed, restored link'; fi
+DISABLED_CONF="$NGX_AVAIL/$DOMAIN.disabled.conf"
+if [[ -L "$NGX_LINK" ]]; then
+  actual=$(readlink "$NGX_LINK")
+  [[ "$actual" == "$NGX_CONF" || "$actual" == "$DISABLED_CONF" ]] || fail 'Link mismatch'
+fi
+# Backups must be outside sites-enabled: Nginx often includes the whole directory.
+BACKUP="${NGX_AVAIL}/.${DOMAIN}.delete-rollback.$$"
+if [[ -L "$NGX_LINK" ]]; then mv "$NGX_LINK" "$BACKUP"; fi
+if ! nginx -t; then [[ ! -L "$BACKUP" ]] || mv "$BACKUP" "$NGX_LINK"; fail 'Nginx validation failed, restored link'; fi
 systemctl reload nginx
 if (( ! PURGE )); then
-  [[ ! -L "$NGX_LINK.disabled" ]] || mv "$NGX_LINK.disabled" "$NGX_LINK"
+  [[ ! -L "$BACKUP" ]] || mv "$BACKUP" "$NGX_LINK"
   fail 'Deletion requires --purge-data. To disable the site, use site-disable.'
 fi
 # Drop enabled site before turning off the FPM pool.
-rm -f -- "$NGX_LINK.disabled"
+rm -f -- "$BACKUP"
 if [[ -f "$FPM_CONF" ]]; then mv "$FPM_CONF" "$FPM_CONF.disabled"; fi
 if ! "php-fpm$PHP_VERSION" -t; then [[ ! -f "$FPM_CONF.disabled" ]] || mv "$FPM_CONF.disabled" "$FPM_CONF"; fail 'PHP-FPM validation failed'; fi
 systemctl reload "php$PHP_VERSION-fpm"
@@ -39,7 +45,7 @@ if [[ -f $(extra_registry) ]]; then
 fi
 mysql -e "DROP DATABASE IF EXISTS \`$DB_NAME\`; DROP USER IF EXISTS '$SITE_USER'@'localhost';"
 crontab -u "$SITE_USER" -r 2>/dev/null || true
-rm -f -- "$NGX_CONF" "$CRED_FILE" "$(extra_registry)" "$STATE"
+rm -f -- "$NGX_CONF" "$DISABLED_CONF" "$CRED_FILE" "$(extra_registry)" "$STATE"
 [[ ! -d "$INC_DIR" ]] || rm -rf -- "$INC_DIR"
 [[ ! -d "$WEB_ROOT" ]] || rm -rf -- "$WEB_ROOT"
 getent passwd "$SITE_USER" >/dev/null && userdel "$SITE_USER" || true

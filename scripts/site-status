@@ -43,12 +43,14 @@ site_entries=()
 
 if [[ -d "$AVAILABLE_DIR" ]]; then
     for conf in "$AVAILABLE_DIR"/*.conf; do
+        [[ "$conf" != *.disabled.conf ]] || continue
         [[ -e "$conf" ]] || continue
 
         domain="$(basename "$conf" .conf)"
         status="inactive"
 
-        if [[ -L "$ENABLED_DIR/$domain.conf" ]]; then
+        if [[ -L "$ENABLED_DIR/$domain.conf" ]] &&
+           [[ $(readlink "$ENABLED_DIR/$domain.conf") == "$conf" ]]; then
             status="active"
         fi
 
